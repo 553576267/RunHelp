@@ -10,7 +10,7 @@ rem  Tokens as the password on GitHub and Gitee.
 rem ============================================================
 
 set "GITCODE_USER=binglengdexie"
-set "GITHUB_USER=binglengdexie"
+set "GITHUB_USER=553576267"
 set "GITEE_USER=binglengdexie"
 set "REPO_NAME=RunHelp"
 
