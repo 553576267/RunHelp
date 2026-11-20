@@ -201,13 +201,9 @@ async function pickPython() {
         </button>
       </div>
       <div class="field" style="margin-bottom: 12px">
-        <label>当前数据库文件（只读）</label>
+        <label>当前数据库文件</label>
         <div class="path-box mono">{{ dbLocation?.current || dataDir }}</div>
-        <span class="muted hint">全部项目、命令、脚本、预设与运行记录都在这一个文件里。换电脑或同步数据请用下方备份文件，不要直接搬动它。</span>
       </div>
-      <span class="muted hint" style="margin-bottom: 12px">
-        内置备份脚本存在数据库里（可在下方「脚本管理」查看/修改），点「立即备份」即可，不依赖任何外部文件路径。备份进度在「运行日志」页查看。
-      </span>
       <div class="field">
         <label>备份目录</label>
         <div class="row">
@@ -216,7 +212,7 @@ async function pickPython() {
           <button class="btn" @click="loadBackups">刷新列表</button>
         </div>
         <span class="muted hint">
-          备份脚本和恢复功能共用这个目录，两边始终一致。留空时用默认坚果云目录。点「立即备份」前请先保存这里。
+          备份脚本和恢复功能共用这个目录。
         </span>
       </div>
       <div class="backup-list" style="margin-top: 14px">
