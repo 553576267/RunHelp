@@ -105,6 +105,8 @@ pub struct RunEndEvent {
     pub exit_code: i32,
     // 进程结束时把捕获到的 stderr 一并带回，防止流式日志丢失时看不到错误
     pub stderr: String,
+    // 命令执行耗时（毫秒），用于结束横幅显示
+    pub duration_ms: u64,
 }
 
 /// 运行中的任务元数据（展示用），key 为可用于 stop_run 的 run_id。
@@ -112,6 +114,8 @@ pub struct RunEndEvent {
 pub struct RunningMeta {
     pub target: String,
     pub started_at: String,
+    /// 普通命令运行时带上命令 id，供命令卡片角标精确匹配；其它任务类型为 None
+    pub command_id: Option<i64>,
 }
 
 /// 暴露给前端的"运行中任务"信息。
@@ -123,4 +127,6 @@ pub struct RunningInfo {
     pub pid: u32,
     /// 当前是否处于暂停请求状态（供全局任务面板显示 暂停/继续）
     pub paused: bool,
+    /// 对应的命令 id（仅普通命令任务有值），用于命令卡片运行角标
+    pub command_id: Option<i64>,
 }

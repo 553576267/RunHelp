@@ -152,6 +152,7 @@ pub fn run_compression(
         crate::models::RunningMeta {
             target: format!("图片压缩: {}", profile_name),
             started_at: state.local_now(),
+            command_id: None,
         },
     );
 

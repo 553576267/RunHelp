@@ -80,6 +80,7 @@ export interface RunEndEvent {
   status: string;
   exit_code: number;
   stderr: string;
+  duration_ms: number;
 }
 
 export interface RunningInfo {
@@ -88,6 +89,7 @@ export interface RunningInfo {
   started_at: string;
   pid: number;
   paused: boolean;
+  command_id: number | null;
 }
 
 export interface BackupInfo {

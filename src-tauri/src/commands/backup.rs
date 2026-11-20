@@ -82,6 +82,7 @@ pub fn run_backup(app: AppHandle, state: State<'_, AppState>) -> Result<String, 
         crate::models::RunningMeta {
             target: "数据库备份".into(),
             started_at: state.local_now(),
+            command_id: None,
         },
     );
 
@@ -153,6 +154,7 @@ pub fn run_backup(app: AppHandle, state: State<'_, AppState>) -> Result<String, 
             status: status_text.into(),
             exit_code: status,
             stderr: String::new(),
+            duration_ms: 0,
         });
     });
 

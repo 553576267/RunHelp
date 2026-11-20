@@ -126,16 +126,17 @@ fn apply_python_path(state: &AppState, proc_cmd: &mut ProcCommand) -> String {
         || trimmed.eq_ignore_ascii_case("python")
         || trimmed.eq_ignore_ascii_case("python.exe")
     {
-        return "[诊断] python_path 未配置具体路径，使用系统 PATH".to_string();
+        // 未配置具体解释器时不输出提示，避免每次运行都刷一行
+        return String::new();
     }
     let p = Path::new(trimmed);
     if !p.exists() {
-        return format!("[诊断] python_path 指向的文件不存在: {}", trimmed);
+        return format!("━━━ 【RunHelp】解释器: {} (路径不存在) ━━━", trimmed);
     }
     let dir = if p.is_file() {
         match p.parent() {
             Some(d) => d,
-            None => return "[诊断] 无法确定 python 目录".into(),
+            None => return String::new(),
         }
     } else {
         p
@@ -164,18 +165,9 @@ fn apply_python_path(state: &AppState, proc_cmd: &mut ProcCommand) -> String {
     let scripts_dir = dir.join("Scripts").to_string_lossy().to_string();
     parts.insert(0, dir_str.clone());
     parts.insert(1, scripts_dir.clone());
-    let resolved = parts
-        .iter()
-        .map(|d| Path::new(d).join("python.exe"))
-        .find(|p| p.exists())
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| "未找到 python.exe".to_string());
     let new_path = parts.join(";");
     proc_cmd.env("PATH", new_path);
-    format!(
-        "[诊断] 指定解释器={}；PATH 首目录={}；python 解析为={}",
-        trimmed, dir_str, resolved
-    )
+    format!("━━━ 【RunHelp】解释器: {} ━━━", trimmed)
 }
 
 /// 字节级无损读取一个输出流：按 \n 切块，用 Utf8StreamDecoder 容错解码后 emit。
@@ -249,12 +241,15 @@ pub fn execute(
         proc_cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let diag = apply_python_path(state, proc_cmd);
-    emit_line(&app, run_id, "info", diag);
-
-    let mut child = proc_cmd
-        .spawn()
-        .map_err(|e| format!("启动进程失败: {}", e))?;
+    let mut child = match proc_cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            // spawn 失败会绕过函数末尾的统一清理，这里主动清掉运行态，
+            // 避免前端留下永远不会消失的"幽灵角标"和卡住的暂停标志。
+            state.runtime.running_meta.lock().unwrap().remove(run_id);
+            return Err(format!("启动进程失败: {}", e));
+        }
+    };
     let pid = child.id();
     state
         .runtime
@@ -307,7 +302,12 @@ pub fn execute(
                 }
                 std::thread::sleep(Duration::from_millis(120));
             }
-            Err(e) => return Err(format!("等待进程失败: {}", e)),
+            Err(e) => {
+                // 同上：异常返回前清理运行态，保证角标不残留
+                state.runtime.children.lock().unwrap().remove(run_id);
+                state.runtime.running_meta.lock().unwrap().remove(run_id);
+                return Err(format!("等待进程失败: {}", e));
+            }
         }
     };
 
@@ -348,6 +348,7 @@ pub fn execute(
         emit_line(&app, run_id, "stderr", "命令超时，已强制终止".into());
     }
     let stderr_text = stderr_buf.lock().unwrap().clone();
+    let duration_ms = start.elapsed().as_millis() as u64;
     let _ = app.emit(
         "run://end",
         RunEndEvent {
@@ -355,6 +356,7 @@ pub fn execute(
             status: status_text.to_string(),
             exit_code: code,
             stderr: stderr_text,
+            duration_ms,
         },
     );
 
@@ -369,6 +371,7 @@ pub fn run_shell(
     cwd: &str,
     shell: &str,
     timeout_ms: i64,
+    label: &str,
 ) -> Result<(i32, String), String> {
     let (program, args) = shell_command(shell, cmd);
     let mut proc_cmd = ProcCommand::new(program);
@@ -379,7 +382,20 @@ pub fn run_shell(
             proc_cmd.current_dir(p);
         }
     }
+    // 统一输出模板：开始横幅（带命令描述）→ 解释器行 → 命令描述 + 回显 → 结果描述
+    let title = if label.trim().is_empty() {
+        "━━━ 【RunHelp】开始执行 ━━━".to_string()
+    } else {
+        format!("━━━ 【RunHelp】开始执行：{} ━━━", label)
+    };
+    emit_line(&app, run_id, "info", title);
+    let diag = apply_python_path(state, &mut proc_cmd);
+    if !diag.is_empty() {
+        emit_line(&app, run_id, "info", diag);
+    }
+    emit_line(&app, run_id, "info", "【RunHelp】执行命令：".into());
     emit_line(&app, run_id, "stdout", format!("$ {}", cmd));
+    emit_line(&app, run_id, "info", "【RunHelp】执行结果：".into());
     execute(app, state, run_id, &mut proc_cmd, timeout_ms)
 }
 

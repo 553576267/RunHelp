@@ -137,13 +137,14 @@ pub fn run_command(command_id: i64, app: AppHandle, state: State<'_, AppState>) 
         crate::models::RunningMeta {
             target: name.clone(),
             started_at: state.local_now(),
+            command_id: Some(command_id),
         },
     );
     thread::spawn(move || {
         let history_id = record_history(&state_arc, project_id, &format!("command:{}", name), command_id);
         state_arc.runtime.history_ids.lock().unwrap().insert(rid.clone(), history_id);
         wait_if_paused(&state_arc, &rid);
-        let result = run_shell(app_move, &state_arc, &rid, &cmd, &cwd, &shell, timeout);
+        let result = run_shell(app_move, &state_arc, &rid, &cmd, &cwd, &shell, timeout, &name);
         match result {
             Ok((code, status)) => finish_history(&state_arc, history_id, &status, code),
             Err(_) => finish_history(&state_arc, history_id, "failed", -1),
@@ -170,13 +171,14 @@ pub fn run_adhoc(
         crate::models::RunningMeta {
             target: format!("临时: {}", cmd),
             started_at: state.local_now(),
+            command_id: None,
         },
     );
     let rid = run_id.clone();
     let state_owned = state.inner().clone();
     thread::spawn(move || {
         wait_if_paused(&state_owned, &rid);
-        let _ = run_shell(app, &state_owned, &rid, &cmd, &cwd, &shell, 0);
+        let _ = run_shell(app, &state_owned, &rid, &cmd, &cwd, &shell, 0, "临时命令");
         state_owned.runtime.paused.lock().unwrap().remove(&rid);
     });
     Ok(run_id)
@@ -266,6 +268,7 @@ pub fn list_running(state: State<'_, AppState>) -> Result<Vec<crate::models::Run
             started_at: m.started_at,
             pid,
             paused,
+            command_id: m.command_id,
         });
     }
     Ok(out)

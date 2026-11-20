@@ -137,12 +137,12 @@ pub fn run_pipeline(pipeline_id: i64, app: AppHandle, state: State<'_, AppState>
 
     let mut stmt = conn
         .prepare(
-            "SELECT s.command_id, s.step_type, s.delay_ms, s.on_error, c.cmd, c.cwd, c.shell, c.timeout_ms \
+            "SELECT s.command_id, s.step_type, s.delay_ms, s.on_error, c.cmd, c.cwd, c.shell, c.timeout_ms, c.name \
              FROM pipeline_steps s LEFT JOIN commands c ON c.id = s.command_id \
              WHERE s.pipeline_id=?1 ORDER BY s.sort_order, s.id",
         )
         .map_err(|e| e.to_string())?;
-    let rows: Vec<(Option<i64>, String, i64, String, Option<String>, Option<String>, Option<String>, Option<i64>)> = stmt
+    let rows: Vec<(Option<i64>, String, i64, String, Option<String>, Option<String>, Option<String>, Option<i64>, Option<String>)> = stmt
         .query_map([pipeline_id], |r| {
             Ok((
                 r.get(0)?,
@@ -153,6 +153,7 @@ pub fn run_pipeline(pipeline_id: i64, app: AppHandle, state: State<'_, AppState>
                 r.get(5)?,
                 r.get(6)?,
                 r.get(7)?,
+                r.get(8)?,
             ))
         })
         .map_err(|e| e.to_string())?
@@ -170,6 +171,7 @@ pub fn run_pipeline(pipeline_id: i64, app: AppHandle, state: State<'_, AppState>
         crate::models::RunningMeta {
             target: format!("流水线: {}", pipeline_name),
             started_at: state.local_now(),
+            command_id: None,
         },
     );
 
@@ -188,7 +190,7 @@ pub fn run_pipeline(pipeline_id: i64, app: AppHandle, state: State<'_, AppState>
         };
 
         let mut aborted = false;
-        for (idx, (cmd_id, step_type, delay_ms, on_error, m_cmd, m_cwd, m_shell, m_timeout)) in rows.iter().enumerate() {
+        for (idx, (cmd_id, step_type, delay_ms, on_error, m_cmd, m_cwd, m_shell, m_timeout, m_name)) in rows.iter().enumerate() {
             wait_if_paused(&state_owned, &rid);
             if aborted || state_owned.runtime.is_stopped(&rid) {
                 aborted = true;
@@ -213,6 +215,12 @@ pub fn run_pipeline(pipeline_id: i64, app: AppHandle, state: State<'_, AppState>
                     stream: "info".into(),
                     line: format!("步骤 {}: 执行中", idx + 1),
                 });
+                let step_label = m_name.clone().unwrap_or_default();
+                let step_label = if step_label.trim().is_empty() {
+                    format!("步骤 {}", idx + 1)
+                } else {
+                    step_label
+                };
                 let result = run_shell(
                     app.clone(),
                     &state_owned,
@@ -221,6 +229,7 @@ pub fn run_pipeline(pipeline_id: i64, app: AppHandle, state: State<'_, AppState>
                     &cwd,
                     shell,
                     m_timeout.unwrap_or(0),
+                    &step_label,
                 );
                 let failed = match result {
                     Ok((code, _)) => code != 0,

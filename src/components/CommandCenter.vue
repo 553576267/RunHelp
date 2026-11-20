@@ -1,15 +1,27 @@
 <script setup lang="ts">
-import { ref, watch, inject } from 'vue';
+import { ref, watch, inject, computed, onUnmounted } from 'vue';
 import { api } from '../lib/api';
-import type { Project, Command } from '../types';
+import type { Project, Command, RunningInfo } from '../types';
 import PipelineEditor from './PipelineEditor.vue';
 
-const props = defineProps<{ project: Project | null }>();
+const props = defineProps<{ project: Project | null; running: RunningInfo[] }>();
 const emit = defineEmits<{ (e: 'run', id: string): void; (e: 'clear-logs'): void }>();
 const notify = inject<(m: string) => void>('notify', () => {});
 const confirm = inject<(m: string, o?: { title?: string; danger?: boolean; confirmText?: string }) => Promise<boolean>>('confirm', async () => false);
 
 const commands = ref<Command[]>([]);
+// 正在启动中的命令 id（方案 A 防抖）：仅覆盖 runCommand 异步返回的窗口期，不阻止多实例
+const startingIds = ref<Set<number>>(new Set());
+// 防抖定时器：点击后固定冷却 1 秒再释放，给按钮稳定的禁用反馈（无需等待 runCommand 返回）
+const debounceTimers = new Map<number, number>();
+// 每个命令正在运行的实例数（来自全局 running 列表，按 command_id 精确匹配，用于左下角角标）
+const runningCount = computed(() => {
+  const m = new Map<number, number>();
+  for (const r of props.running) {
+    if (r.command_id != null) m.set(r.command_id, (m.get(r.command_id) ?? 0) + 1);
+  }
+  return m;
+});
 const showCommandModal = ref(false);
 const showPipeline = ref(false);
 const showAdhoc = ref(false);
@@ -89,6 +101,14 @@ async function removeCommand(c: Command) {
 }
 
 async function run(c: Command) {
+  // 防抖：点击后固定冷却 1 秒，期间重复点击直接忽略，按钮有明确的禁用反馈
+  if (startingIds.value.has(c.id)) return;
+  startingIds.value.add(c.id);
+  const timer = window.setTimeout(() => {
+    startingIds.value.delete(c.id);
+    debounceTimers.delete(c.id);
+  }, 600);
+  debounceTimers.set(c.id, timer);
   // 先清空日志再启动，避免后端线程早期输出被随后到达的 clear 清掉
   emit('clear-logs');
   try {
@@ -99,6 +119,11 @@ async function run(c: Command) {
     notify(`启动失败: ${e}`);
   }
 }
+
+onUnmounted(() => {
+  for (const t of debounceTimers.values()) window.clearTimeout(t);
+  debounceTimers.clear();
+});
 
 async function runAdhoc() {
   const cmd = adhoc.value.cmd.trim();
@@ -167,6 +192,14 @@ async function openPipeline() {
             <span v-if="c.timeout_ms">超时: {{ c.timeout_ms / 1000 }}s</span>
           </div>
           <div class="cmd-actions">
+            <span
+              v-if="(runningCount.get(c.id) ?? 0) > 0"
+              class="run-badge"
+              :title="`${runningCount.get(c.id)} 个实例运行中，可在「全局任务」终止`"
+            >
+              <span class="run-dot"></span>
+              <span class="run-num">{{ runningCount.get(c.id) }}</span>
+            </span>
             <button class="act act-edit" title="编辑" @click="openEdit(c)">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
@@ -177,8 +210,11 @@ async function openPipeline() {
                 <path d="M3 6h18" /><path d="M8 6V4h8v2" /><path d="M19 6l-1 14H6L5 6" /><path d="M10 11v6M14 11v6" />
               </svg>
             </button>
-            <button class="act act-run" title="运行" @click="run(c)">
-              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
+            <button class="act act-run" :disabled="startingIds.has(c.id)" :title="startingIds.has(c.id) ? '启动中…' : '运行'" @click="run(c)">
+              <svg v-if="startingIds.has(c.id)" class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+                <path d="M12 3a9 9 0 1 0 9 9" />
+              </svg>
+              <svg v-else viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
             </button>
           </div>
         </div>
@@ -302,7 +338,7 @@ async function openPipeline() {
 .cmd-line { font-size: 11px; color: var(--text-1); background: var(--bg-0); padding: 7px 8px; border-radius: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cmd-meta { display: flex; gap: 10px; font-size: 10px; flex-wrap: wrap; min-height: 14px; }
 .cmd-meta span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cmd-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: auto; }
+.cmd-actions { display: flex; gap: 6px; justify-content: flex-end; align-items: center; margin-top: auto; }
 .act {
   width: 28px; height: 26px; display: inline-flex; align-items: center; justify-content: center;
   border: 1px solid var(--border); background: var(--bg-2); color: var(--text-1);
@@ -315,6 +351,20 @@ async function openPipeline() {
 .act-del:hover { color: var(--danger); border-color: var(--danger); }
 .act-run { color: #fff; background: var(--accent); border-color: var(--accent); }
 .act-run:hover { background: var(--accent-hover); color: #fff; }
+.act-run:disabled { opacity: .8; cursor: default; }
+/* 防抖期间：图标原地旋转，鼠标指针保持正常，不再像卡死 */
+.act-run .spin { animation: btn-spin .7s linear infinite; }
+@keyframes btn-spin { to { transform: rotate(360deg); } }
+/* 左下角运行中角标：绿点 + 实例数，margin-right:auto 推到最左，与右侧按钮两端对齐 */
+.run-badge {
+  margin-right: auto; display: inline-flex; align-items: center; gap: 4px;
+  height: 20px; padding: 0 7px; border-radius: 10px;
+  background: rgba(34, 197, 94, .12); border: 1px solid rgba(34, 197, 94, .3);
+  color: #22c55e;
+}
+.run-dot { width: 6px; height: 6px; border-radius: 50%; background: #22c55e; animation: dot-pulse 1.2s ease-in-out infinite; }
+.run-num { font-size: 11px; font-weight: 600; line-height: 1; }
+@keyframes dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 .add-card { width: 200px; min-height: 120px; border-style: dashed; background: transparent; color: var(--text-2); cursor: pointer; font-size: 14px; }
 .add-card:hover { color: var(--accent); border-color: var(--accent); }
 </style>

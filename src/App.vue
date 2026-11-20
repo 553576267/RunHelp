@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted, provide, computed, watch } from 'vue';
 import { listen } from '@tauri-apps/api/event';
 import { getVersion } from '@tauri-apps/api/app';
+import { open as openUrl } from '@tauri-apps/plugin-shell';
 import { api } from './lib/api';
 import type { Project, LogEvent, RunEndEvent, RunHistory } from './types';
 import ProjectSidebar from './components/ProjectSidebar.vue';
@@ -48,8 +49,9 @@ const appVersion = ref('');
 const onlyErrors = ref(false);
 const ERROR_RE = /(?:error|exception|traceback|fatal|failed|failure|denied|refused|unhandled|cannot|invalid|not found|timeout|timed out|npm ERR|ERR!|错误|异常|失败|拒绝|无法|不存在|未找到|超时|致命)/i;
 function isErrorLog(l: LogEvent): boolean {
-  if (/^── 运行结束/.test(l.line)) {
-    return /失败|超时|failed|timeout/i.test(l.line);
+  if (/^━━━ 【RunHelp】/.test(l.line)) {
+    // 结束横幅：失败/超时标红；开始横幅与解释器行不标红
+    return /执行失败|执行超时|failed|timeout/i.test(l.line);
   }
   return l.stream === 'stderr' && ERROR_RE.test(l.line);
 }
@@ -190,6 +192,42 @@ function showToast(msg: string) {
   toastTimer = window.setTimeout(() => (toast.value = ''), 2600);
 }
 
+// 复制当前窗口日志（跟随「错误」筛选，复制的是可见内容）
+async function copyLogs() {
+  const text = visibleLogs.value.map((l) => l.line).join('\n');
+  if (!text) {
+    showToast('当前没有可复制的日志');
+    return;
+  }
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      // 降级：临时 textarea + execCommand（兼容个别 WebView2 权限场景）
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    showToast(`已复制 ${visibleLogs.value.length} 行日志`);
+  } catch {
+    showToast('复制失败，请检查剪贴板权限');
+  }
+}
+
+// 艺术字跳转开源仓库：WebView2 里 <a target=_blank> 会被拦截，改走系统默认浏览器
+async function openRepo() {
+  try {
+    await openUrl('https://gitcode.com/binglengdexie/RunHelp');
+  } catch {
+    showToast('打开仓库失败');
+  }
+}
+
 async function loadProjects() {
   projects.value = await api.listProjects();
   const saved = uiStateApplied ? readUiState() : initialUiState;
@@ -294,15 +332,16 @@ function handleRunEnd(e: RunEndEvent) {
     }
   }
   const label: Record<string, string> = {
-    success: '成功',
-    failed: '失败',
-    timeout: '超时',
+    success: '执行完成',
+    failed: '执行失败',
+    timeout: '执行超时',
     stopped: '已停止',
   };
+  const secs = (e.duration_ms / 1000).toFixed(1);
   logs.value.push({
     run_id: e.run_id,
     stream: 'info',
-    line: `── 运行结束 [${e.run_id}]：${label[e.status] ?? e.status}（退出码 ${e.exit_code}）`,
+    line: `━━━ 【RunHelp】${label[e.status] ?? e.status} · 退出码 ${e.exit_code} · ${secs}s ━━━`,
   });
   if (logs.value.length > 1200) logs.value.splice(0, 400);
   // 运行结束刷新记录（运行记录已移到「全局任务」页）
@@ -355,9 +394,8 @@ onUnmounted(() => {
         <a
           class="brand-lockup"
           href="https://gitcode.com/binglengdexie/RunHelp"
-          target="_blank"
-          rel="noopener noreferrer"
           title="打开 RunHelp 开源仓库"
+          @click.prevent="openRepo"
         >
           <div class="brand-art">
             <span class="art-run">Run</span><span class="art-help">Help</span>
@@ -406,6 +444,7 @@ onUnmounted(() => {
           <CommandCenter
             v-if="tab === 'commands'"
             :project="selected"
+            :running="running"
             @run="onRun"
             @clear-logs="logs = []"
           />
@@ -488,6 +527,7 @@ onUnmounted(() => {
                 title="仅显示错误日志"
                 @click="onlyErrors = !onlyErrors"
               >错误 <span class="err-count">{{ errorCount }}</span></button>
+              <button class="btn ghost sm" title="复制当前日志" @click="copyLogs">复制</button>
               <button class="btn ghost sm" @click="logs = []">清空</button>
             </div>
           </div>

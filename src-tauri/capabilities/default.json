@@ -6,6 +6,14 @@
   "permissions": [
     "core:default",
     "core:event:default",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    {
+      "identifier": "shell:allow-open",
+      "allow": [
+        {
+          "path": "https://gitcode.com/binglengdexie/RunHelp*"
+        }
+      ]
+    }
   ]
 }
