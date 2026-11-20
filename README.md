@@ -22,7 +22,7 @@ Windows 桌面端开发辅助工具：管理多个项目的常用命令、一键
 - **GitHub 镜像**：`https://github.com/binglengdexie/RunHelp/releases`
 - **Gitee 镜像**：`https://gitee.com/binglengdexie/RunHelp/releases`
 
-下载 `RunHelp_x.x.x_x64-setup.exe` 直接安装即可。三个仓库内容一致：**GitCode 是主仓**，日常开发只推 GitCode；GitHub 与 Gitee 由 GitCode CI 单向自动镜像，仅作为其他地区的访问入口。
+下载 `RunHelp_x.x.x_x64-setup.exe` 直接安装即可。三个仓库内容一致：**GitCode 是主仓**，日常开发只推 GitCode；GitHub 与 Gitee 由 GitCode 内置的「仓库镜像 → Push」单向自动同步，仅作为其他地区的访问入口。
 
 ## 开发
 

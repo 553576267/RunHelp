@@ -52,11 +52,11 @@ cargo check --manifest-path src-tauri/Cargo.toml
 
 ## 发版流程
 
-仓库架构：**GitCode 是主仓**（`origin`），日常提交只 push 到 GitCode；GitHub 与 Gitee 是镜像，由 `.gitci.yml` 在 push 后单向自动同步，不要在镜像仓库直接改代码。
+仓库架构：**GitCode 是主仓**（`origin`），日常提交只 push 到 GitCode；GitHub 与 Gitee 是镜像，由 GitCode 项目设置里的「仓库镜像 → Push」在 push 后单向自动同步，不要在镜像仓库直接改代码。
 
 1. 更新 `CHANGELOG.md` 与 `package.json` / `Cargo.toml` 版本号。
 2. 提交后打 tag：`git tag -a v0.1.0 -m "version 0.1.0" && git push origin v0.1.0`（origin 指向 GitCode）。
-3. `.gitci.yml` 把代码和 tag 同步到 GitHub，GitHub Actions 构建 NSIS 安装包并创建草稿 Release，确认无误后发布。
+3. GitCode「仓库镜像 → Push」把代码和 tag 同步到 GitHub，GitHub Actions 构建 NSIS 安装包并创建草稿 Release，确认无误后发布。
 4. 把安装包复制到 GitCode / Gitee 镜像仓库的「发行版」，方便国内用户下载。
 
 ## 问题反馈
