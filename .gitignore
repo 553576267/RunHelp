@@ -1,0 +1,52 @@
+# ============ 依赖与构建产物 ============
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+
+# ============ 数据库与备份（含用户数据的文件绝不入库） ============
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+runhelp.db*
+backups/
+RunHelpBackups/
+
+# ============ 密钥与凭据 ============
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+id_rsa
+id_ed25519
+
+# ============ Python ============
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# ============ 编辑器 / 系统临时文件 ============
+.vscode/
+.idea/
+*.swp
+*.swo
+*.log
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ============ 打包临时产物 ============
+*.msi
+*.exe
+*.appx
+*.dmg
+*.AppImage

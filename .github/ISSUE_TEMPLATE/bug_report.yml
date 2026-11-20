@@ -1,0 +1,72 @@
+name: 问题反馈
+description: 报告 RunHelp 的异常行为
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请尽量填写完整，尤其附上运行日志，能大幅加快定位速度。
+
+  - type: input
+    id: version
+    attributes:
+      label: RunHelp 版本
+      description: 在「全局设置 → 关于」或标题栏查看
+      placeholder: "例如 0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: 系统版本
+      placeholder: "例如 Windows 11 23H2"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: scene
+    attributes:
+      label: 出问题时的场景
+      options:
+        - 命令中心运行命令
+        - 流水线执行
+        - 图片压缩
+        - 数据库备份 / 恢复
+        - 窗口界面与主题
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 一步步描述怎么触发这个问题
+      placeholder: |
+        1. 新建开发项目，路径填 D:\xxx
+        2. 添加命令 python server.py，类型选运行
+        3. 点击运行后……
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 运行日志
+      description: 展开底部「运行日志」页签，把相关输出整段贴上来（可点「错误」只看错误）
+      render: shell
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 其他补充
+      description: 截图、相关配置等

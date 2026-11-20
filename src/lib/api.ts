@@ -1,0 +1,100 @@
+import { invoke } from '@tauri-apps/api/core';
+
+// 注意：Tauri 2 命令的顶层参数在 JS 侧必须用 camelCase
+// （Rust 端 snake_case 参数由框架自动转换）。
+// 但事件 payload 与嵌套结构体字段走 serde 默认命名，仍为 snake_case。
+function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  return invoke<T>(cmd, args);
+}
+
+export const api = {
+  listProjects: () => call<import('../types').Project[]>('list_projects'),
+  createProject: (name: string, path: string, type: string, description: string) =>
+    call<number>('create_project', { name, path, kind: type, description }),
+  updateProject: (id: number, name: string, path: string, type: string, description: string) =>
+    call<void>('update_project', { id, name, path, kind: type, description }),
+  deleteProject: (id: number) => call<void>('delete_project', { id }),
+  listDeletedProjects: () => call<import('../types').Project[]>('list_deleted_projects'),
+  restoreProject: (id: number) => call<void>('restore_project', { id }),
+  permanentDeleteProject: (id: number) => call<void>('permanent_delete_project', { id }),
+  emptyRecycleBin: () => call<number>('empty_recycle_bin'),
+
+  listCommands: (projectId: number) =>
+    call<import('../types').Command[]>('list_commands', { projectId }),
+  saveCommand: (c: Partial<import('../types').Command> & { project_id: number }) =>
+    call<number>('save_command', {
+      id: c.id ?? null,
+      projectId: c.project_id,
+      name: c.name,
+      cmd: c.cmd,
+      cwd: c.cwd ?? '',
+      shell: c.shell ?? 'powershell',
+      kind: c.type ?? 'custom',
+      timeoutMs: c.timeout_ms ?? 0,
+      sortOrder: c.sort_order ?? 0,
+    }),
+  deleteCommand: (id: number) => call<void>('delete_command', { id }),
+  runCommand: (id: number) => call<string>('run_command', { commandId: id }),
+  runAdhoc: (cmd: string, cwd: string, shell: string) =>
+    call<string>('run_adhoc', { cmd, cwd, shell }),
+  stopRun: (runId: string) => call<void>('stop_run', { runId }),
+  pauseRun: (runId: string) => call<void>('pause_run', { runId }),
+  resumeRun: (runId: string) => call<void>('resume_run', { runId }),
+  listHistory: (limit: number) =>
+    call<import('../types').RunHistory[]>('list_history', { limit }),
+  listRunning: () => call<import('../types').RunningInfo[]>('list_running'),
+  clearHistory: () => call<void>('clear_history'),
+
+  listPipelines: (projectId: number) =>
+    call<import('../types').Pipeline[]>('list_pipelines', { projectId }),
+  savePipeline: (id: number | null, projectId: number, name: string, description: string) =>
+    call<number>('save_pipeline', { id, projectId, name, description }),
+  deletePipeline: (id: number) => call<void>('delete_pipeline', { id }),
+  listPipelineSteps: (pipelineId: number) =>
+    call<import('../types').PipelineStep[]>('list_pipeline_steps', { pipelineId }),
+  savePipelineSteps: (
+    pipelineId: number,
+    // steps 是嵌套结构体，字段走 serde 默认命名，保持 snake_case
+    steps: { command_id: number | null; step_type: string; delay_ms: number; on_error: string }[]
+  ) => call<void>('save_pipeline_steps', { pipelineId, steps }),
+  runPipeline: (id: number) => call<string>('run_pipeline', { pipelineId: id }),
+
+  listScripts: () => call<import('../types').Script[]>('list_scripts'),
+  getScript: (id: number) => call<import('../types').Script>('get_script', { id }),
+  saveScript: (s: Partial<import('../types').Script> & { name: string }) =>
+    call<number>('save_script', {
+      id: s.id ?? null,
+      name: s.name,
+      language: s.language ?? 'python',
+      sourceType: s.source_type ?? 'builtin',
+      content: s.content ?? '',
+      filePath: s.file_path ?? '',
+    }),
+  deleteScript: (id: number) => call<void>('delete_script', { id }),
+
+  getSettings: () => call<Record<string, string>>('get_settings'),
+  setSetting: (key: string, value: string) => call<void>('set_setting', { key, value }),
+  setWindowTheme: (theme: string) => call<void>('set_window_theme', { theme }),
+  dataDir: () => call<string>('data_dir'),
+  getDbLocation: () => call<{ current: string }>('get_db_location'),
+
+  // 数据库备份与恢复
+  getDefaultBackupDir: () => call<string>('get_default_backup_dir'),
+  listBackups: () => call<import('../types').BackupInfo[]>('list_backups'),
+  restoreBackup: (name: string) => call<string>('restore_backup', { name }),
+  runBackup: () => call<string>('run_backup'),
+
+  listProfiles: (projectId: number) =>
+    call<import('../types').CompressionProfile[]>('list_profiles', { projectId }),
+  saveProfile: (
+    id: number | null,
+    projectId: number,
+    name: string,
+    paramsJson: string,
+    scriptId: number | null
+  ) => call<number>('save_profile', { id, projectId, name, paramsJson, scriptId }),
+  deleteProfile: (id: number) => call<void>('delete_profile', { id }),
+  runCompression: (profileId: number, inputPaths: string[]) =>
+    call<string>('run_compression', { profileId, inputPaths }),
+  stopCompression: (runId: string) => call<void>('stop_compression', { runId }),
+};
