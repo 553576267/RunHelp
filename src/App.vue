@@ -350,14 +350,20 @@ onUnmounted(() => {
 <template>
   <div class="app" :class="{ resizing }">
     <aside class="sidebar">
-      <!-- 品牌字标：艺术字 RunHelp + 版本号；系统标题栏图标后只显示 RunHelp -->
+      <!-- 品牌字标：艺术字 RunHelp + 版本号，点击打开开源仓库 -->
       <div class="brand">
-        <div class="brand-lockup">
+        <a
+          class="brand-lockup"
+          href="https://gitcode.com/binglengdexie/RunHelp"
+          target="_blank"
+          rel="noopener noreferrer"
+          title="打开 RunHelp 开源仓库"
+        >
           <div class="brand-art">
             <span class="art-run">Run</span><span class="art-help">Help</span>
           </div>
           <div class="brand-version">{{ appVersion }}</div>
-        </div>
+        </a>
       </div>
       <ProjectSidebar
         :projects="projects"
@@ -381,10 +387,6 @@ onUnmounted(() => {
           >{{ t.label }}</button>
         </nav>
         <div class="topbar-right">
-          <span v-if="selected" class="project-chip" :title="selected.path">
-            <span class="dot" :class="selected.type"></span>{{ selected.name }}
-          </span>
-          <span v-else class="muted">未选择项目</span>
           <button
             class="btn settings-btn"
             :class="{ active: tab === 'settings' }"
@@ -541,10 +543,16 @@ onUnmounted(() => {
   height: 60px; display: flex; align-items: center; justify-content: center;
   padding: 0 18px; border-bottom: 1px solid var(--border-soft);
 }
-.brand-lockup { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+.brand-lockup {
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  text-decoration: none; cursor: pointer; border-radius: 6px;
+  padding: 4px 8px; margin: -4px -8px; transition: opacity .15s;
+}
+.brand-lockup:hover { opacity: .82; }
+.brand-lockup:active { opacity: .65; }
 /* RunHelp 艺术字：Run 用主文字色，Help 用渐变填充，斜体呈现速度感 */
 .brand-art {
-  font-size: 21px; font-weight: 800; font-style: italic; letter-spacing: -.045em;
+  font-size: 21px; font-weight: 800; font-style: italic; letter-spacing: .06em;
   line-height: 1; white-space: nowrap;
 }
 .art-run { color: var(--text-0); }
@@ -577,13 +585,6 @@ onUnmounted(() => {
 .topbar-right { font-size: 12px; display: flex; align-items: center; gap: 12px; }
 .settings-btn { gap: 7px; }
 .settings-btn.active { border-color: var(--accent); color: var(--accent); }
-.project-chip {
-  display: inline-flex; align-items: center; gap: 7px;
-  padding: 5px 11px; background: var(--bg-2); border-radius: 6px;
-  max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex-shrink: 0; }
-.dot.image { background: var(--warn); }
 .content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .workspace { flex: 1; min-height: 0; overflow: auto; padding: 20px 22px; }
 .console {

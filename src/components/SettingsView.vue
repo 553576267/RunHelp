@@ -156,7 +156,7 @@ async function pickPython() {
   <div class="settings-page">
     <div class="page-head">
       <h2>全局设置</h2>
-      <p class="muted">全局配置、数据库位置与脚本管理</p>
+      <p class="muted">全局配置、备份恢复与脚本管理</p>
     </div>
 
     <div class="card section">
@@ -194,24 +194,16 @@ async function pickPython() {
     </div>
 
     <div class="card section">
-      <h3>数据库位置</h3>
-      <div class="field">
-        <label>当前数据库文件</label>
-        <div class="path-box mono">{{ dbLocation?.current || dataDir }}</div>
-      </div>
-      <div class="field" style="margin-top: 12px">
-        <label>所在目录</label>
-        <div class="path-box mono">{{ dataDir }}</div>
-        <span class="muted hint">全部项目、命令、脚本、预设与运行记录都在这一个文件里。需要换电脑或同步数据时，用下方「备份与恢复」，不要直接搬动此文件。</span>
-      </div>
-    </div>
-
-    <div class="card section">
       <div class="section-head">
         <h3>备份与恢复</h3>
         <button class="btn primary sm" :disabled="backingUp" @click="runBackup">
           {{ backingUp ? '备份中…' : '立即备份' }}
         </button>
+      </div>
+      <div class="field" style="margin-bottom: 12px">
+        <label>当前数据库文件（只读）</label>
+        <div class="path-box mono">{{ dbLocation?.current || dataDir }}</div>
+        <span class="muted hint">全部项目、命令、脚本、预设与运行记录都在这一个文件里。换电脑或同步数据请用下方备份文件，不要直接搬动它。</span>
       </div>
       <span class="muted hint" style="margin-bottom: 12px">
         内置备份脚本存在数据库里（可在下方「脚本管理」查看/修改），点「立即备份」即可，不依赖任何外部文件路径。备份进度在「运行日志」页查看。

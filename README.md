@@ -16,6 +16,20 @@ Windows 桌面端开发辅助工具：管理多个项目的常用命令、一键
 - **主题**：深色 / 浅色切换，原生标题栏跟随主题
 - **单实例**：重复点击图标只激活已有窗口，不会开多个实例
 
+## 界面预览
+
+**命令中心**：按项目组织安装 / 构建 / 运行命令，底部运行日志默认折叠、可展开，支持只看错误
+
+![命令中心](docs/screenshots/command-center.png)
+
+**图片压缩**：参数预设 + 内置压缩脚本，支持常用目录收藏与进度显示
+
+![图片压缩](docs/screenshots/image-compress.png)
+
+**全局任务**：跨项目查看运行中任务，可暂停 / 终止常驻服务，并保留运行记录
+
+![全局任务](docs/screenshots/tasks.png)
+
 ## 下载安装
 
 - **GitCode（主仓，国内推荐）**：`https://gitcode.com/binglengdexie/RunHelp/releases`
