@@ -186,6 +186,8 @@ const en: Record<string, string> = {
   "成功": "Success",
   "打开 RunHelp 开源仓库": "Open RunHelp open-source repo",
   "打开仓库失败": "Failed to open repo",
+  "打开目录失败: {error}": "Failed to open folder: {error}",
+  "点击打开项目目录": "Click to open project folder",
   "打开备份失败: {error}": "Failed to open backup: {error}",
   "打开当前库失败: {error}": "Failed to open current database: {error}",
   "打开迁移源库失败: {error}": "Failed to open migration source database: {error}",

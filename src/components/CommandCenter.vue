@@ -107,6 +107,16 @@ function clearTextSelection() {
   window.getSelection()?.removeAllRanges();
 }
 
+// 点击页头项目地址，用系统资源管理器打开对应本地目录
+async function openProjectFolder() {
+  if (!props.project?.path) return;
+  try {
+    await api.openFolder(props.project.path);
+  } catch (e) {
+    notify(t('打开目录失败: {error}', { error: String(e) }));
+  }
+}
+
 function openEdit(c: Command) {
   clearTextSelection();
   editing.value = c;
@@ -239,7 +249,16 @@ async function removePipeline(p: Pipeline) {
       <div class="page-head">
         <div>
           <h2>{{ t('命令中心') }}</h2>
-          <p class="muted">{{ project.name }} · {{ project.path }}</p>
+          <p class="muted">
+            {{ project.name }} ·
+            <span
+              v-if="project.path"
+              class="project-path-link"
+              :title="t('点击打开项目目录')"
+              @click="openProjectFolder"
+            >{{ project.path }}</span>
+            <span v-else>{{ t('无路径') }}</span>
+          </p>
         </div>
         <div class="row" style="gap: 8px">
           <button class="btn" @click="showAdhoc = true">{{ t('临时命令') }}</button>
@@ -439,6 +458,8 @@ async function removePipeline(p: Pipeline) {
 .adhoc-tip { font-size: 11px; margin: -4px 0 14px; }
 .page-head h2 { font-size: 18px; font-weight: 600; }
 .page-head p { font-size: 12px; margin-top: 4px; }
+.project-path-link { color: var(--accent); cursor: pointer; border-bottom: 1px dashed transparent; }
+.project-path-link:hover { border-bottom-color: var(--accent); }
 .cmd-grid { display: grid; grid-template-columns: repeat(auto-fill, 200px); gap: 12px; }
 .cmd-card { width: 200px; padding: 12px; display: flex; flex-direction: column; gap: 9px; user-select: none; }
 .cmd-card input, .cmd-card textarea { user-select: text; }

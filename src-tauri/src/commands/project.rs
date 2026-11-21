@@ -1,7 +1,28 @@
+use std::path::Path;
+
 use tauri::State;
 
 use crate::models::Project;
 use crate::state::AppState;
+
+/// 在项目地址上点击时，用系统资源管理器打开对应本地目录。
+/// 走 explorer.exe 而非 shell:allow-open（后者当前只白名单了仓库 URL）。
+#[tauri::command]
+pub fn open_folder(path: String, state: State<'_, AppState>) -> Result<(), String> {
+    let lang = crate::i18n::lang(&state);
+    if path.trim().is_empty() {
+        return Err(crate::i18n::tr(&lang, "项目路径为空"));
+    }
+    if !Path::new(&path).is_dir() {
+        return Err(crate::i18n::trf(&lang, "目录不存在: {path}", &[("path", &path)]));
+    }
+    // explorer 传目录路径即可打开；spawn 后立即返回，不等待窗口关闭
+    std::process::Command::new("explorer")
+        .arg(&path)
+        .spawn()
+        .map_err(|e| crate::i18n::trf(&lang, "打开目录失败: {error}", &[("error", &e.to_string())]))?;
+    Ok(())
+}
 
 fn query_projects(state: &AppState, deleted: bool) -> Result<Vec<Project>, String> {
     let conn = state.conn()?;

@@ -42,6 +42,9 @@ pub fn trf(language: &str, key: &str, vars: &[(&str, &str)]) -> String {
 
 /// 英文词条表。由批量提取脚本填充，未翻译的条目会回退中文原文。
 static EN: &[(&str, &str)] = &[
+    ("项目路径为空", "Project path is empty"),
+    ("目录不存在: {path}", "Folder not found: {path}"),
+    ("打开目录失败: {error}", "Failed to open folder: {error}"),
     ("Python 解释器路径（全局生效）", "Python interpreter path (applies globally)"),
     ("Python 路径已保存", "Python path saved"),
     ("RunHelp · 执行完成", "RunHelp · Execution complete"),

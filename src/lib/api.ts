@@ -9,6 +9,7 @@ function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 
 export const api = {
   listProjects: () => call<import('../types').Project[]>('list_projects'),
+  openFolder: (path: string) => call<void>('open_folder', { path }),
   createProject: (name: string, path: string, type: string, description: string) =>
     call<number>('create_project', { name, path, kind: type, description }),
   updateProject: (id: number, name: string, path: string, type: string, description: string) =>
