@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, inject } from 'vue';
 import { api } from '../lib/api';
+import { t } from '../lib/i18n';
 import type { Pipeline, PipelineStep, Command } from '../types';
 
 const props = defineProps<{
@@ -28,7 +29,7 @@ if (activeId.value != null) {
 
 function addCommandStep() {
   if (!props.commands.length) {
-    notify('请先添加命令');
+    notify(t('请先添加命令'));
     return;
   }
   steps.value.push({
@@ -68,7 +69,7 @@ function move(i: number, dir: -1 | 1) {
 
 async function save(): Promise<number | null> {
   if (!form.value.name.trim()) {
-    notify('请填写流水线名称');
+    notify(t('请填写流水线名称'));
     return null;
   }
   loading.value = true;
@@ -91,10 +92,10 @@ async function save(): Promise<number | null> {
     );
     activeId.value = id; // 新建保存后转为编辑态
     emit('saved');
-    notify('流水线已保存');
+    notify(t('流水线已保存'));
     return id;
   } catch (e) {
-    notify(`保存失败: ${e}`);
+    notify(t('保存失败: {error}', { error: String(e) }));
     return null;
   } finally {
     loading.value = false;
@@ -103,11 +104,11 @@ async function save(): Promise<number | null> {
 
 async function remove() {
   if (activeId.value == null) return;
-  if (!(await confirm(`删除流水线「${form.value.name}」？`, { title: '删除流水线', danger: true, confirmText: '删除' }))) return;
+  if (!(await confirm(t('删除流水线「{name}」？', { name: form.value.name }), { title: t('删除流水线'), danger: true, confirmText: t('删除') }))) return;
   await api.deletePipeline(activeId.value);
   emit('saved');
   emit('close');
-  notify('流水线已删除');
+  notify(t('流水线已删除'));
 }
 
 async function run() {
@@ -115,66 +116,66 @@ async function run() {
   if (id == null) return;
   const runId = await api.runPipeline(id);
   emit('run', runId);
-  notify('流水线已启动');
+  notify(t('流水线已启动'));
 }
 </script>
 
 <template>
   <div class="modal-mask" @click.self="emit('close')">
     <div class="modal editor" role="dialog" aria-modal="true">
-      <h3>{{ activeId == null ? '新建流水线' : '编辑流水线' }}</h3>
+      <h3>{{ activeId == null ? t('新建流水线') : t('编辑流水线') }}</h3>
 
       <div class="pipe-form">
         <div class="field">
-          <label>流水线名称</label>
-          <input v-model="form.name" class="input" placeholder="例如：重启服务" />
+          <label>{{ t('流水线名称') }}</label>
+          <input v-model="form.name" class="input" :placeholder="t('例如：重启服务')" />
         </div>
         <div class="field">
-          <label>描述（可选）</label>
-          <input v-model="form.description" class="input" placeholder="简单说明这条流水线的用途" />
+          <label>{{ t('描述（可选）') }}</label>
+          <input v-model="form.description" class="input" :placeholder="t('简单说明这条流水线的用途')" />
         </div>
       </div>
 
       <div class="steps-area">
         <div class="steps-toolbar">
-          <span class="muted">步骤（按顺序执行）</span>
+          <span class="muted">{{ t('步骤（按顺序执行）') }}</span>
           <div class="row" style="gap: 6px">
-            <button class="btn sm" @click="addCommandStep">+ 命令</button>
-            <button class="btn sm" @click="addDelayStep">+ 等待</button>
+            <button class="btn sm" @click="addCommandStep">+ {{ t('命令') }}</button>
+            <button class="btn sm" @click="addDelayStep">+ {{ t('等待') }}</button>
           </div>
         </div>
         <div class="steps-list">
           <div v-for="(s, i) in steps" :key="s.id" class="step-row">
             <span class="step-no">{{ i + 1 }}</span>
             <template v-if="s.step_type === 'delay'">
-              <span class="tag">等待</span>
+              <span class="tag">{{ t('等待') }}</span>
               <input v-model.number="s.delay_ms" type="number" class="input sm" style="width: 110px" />
-              <span class="muted">毫秒</span>
+              <span class="muted">{{ t('毫秒') }}</span>
             </template>
             <template v-else>
               <select v-model.number="s.command_id" class="select sm" style="flex: 1">
                 <option v-for="c in commands" :key="c.id" :value="c.id" :title="c.cmd">{{ c.name }}</option>
               </select>
               <select v-model="s.on_error" class="select sm" style="width: 96px">
-                <option value="stop">失败即停</option>
-                <option value="continue">继续</option>
+                <option value="stop">{{ t('失败即停') }}</option>
+                <option value="continue">{{ t('继续') }}</option>
               </select>
             </template>
             <div class="step-actions">
-              <button class="icon-sm" title="上移" @click="move(i, -1)">↑</button>
-              <button class="icon-sm" title="下移" @click="move(i, 1)">↓</button>
-              <button class="icon-sm danger" title="删除" @click="removeStep(i)">×</button>
+              <button class="icon-sm" :title="t('上移')" @click="move(i, -1)">↑</button>
+              <button class="icon-sm" :title="t('下移')" @click="move(i, 1)">↓</button>
+              <button class="icon-sm danger" :title="t('删除')" @click="removeStep(i)">×</button>
             </div>
           </div>
-          <div v-if="!steps.length" class="empty-small muted">还没有步骤，点击上方按钮添加</div>
+          <div v-if="!steps.length" class="empty-small muted">{{ t('还没有步骤，点击上方按钮添加') }}</div>
         </div>
       </div>
 
       <div class="modal-actions">
-        <button v-if="activeId != null" class="btn danger" @click="remove">删除流水线</button>
-        <button class="btn" @click="emit('close')">关闭</button>
-        <button class="btn" :disabled="loading" @click="save">保存</button>
-        <button class="btn primary" :disabled="loading || !steps.length" @click="run">运行</button>
+        <button v-if="activeId != null" class="btn danger" @click="remove">{{ t('删除流水线') }}</button>
+        <button class="btn" @click="emit('close')">{{ t('关闭') }}</button>
+        <button class="btn" :disabled="loading" @click="save">{{ t('保存') }}</button>
+        <button class="btn primary" :disabled="loading || !steps.length" @click="run">{{ t('运行') }}</button>
       </div>
     </div>
   </div>

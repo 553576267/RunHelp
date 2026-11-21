@@ -104,13 +104,14 @@ fn finish_history(state: &AppState, id: i64, status: &str, code: i32) {
 #[tauri::command]
 pub fn run_command(command_id: i64, app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
     let conn = state.conn()?;
+    let lang = crate::i18n::lang(state.inner());
     let row: (i64, String, String, String, String, i64) = conn
         .query_row(
             "SELECT c.project_id, c.cmd, c.cwd, c.shell, c.name, c.timeout_ms FROM commands c WHERE c.id=?1",
             [command_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         )
-        .map_err(|e| format!("命令不存在: {}", e))?;
+        .map_err(|e| crate::i18n::trf(&lang, "命令不存在: {error}", &[("error", &e.to_string())]))?;
     let (project_id, cmd, rel_cwd, shell, name, timeout) = row;
 
     let project_path: String = conn
@@ -164,13 +165,14 @@ pub fn run_adhoc(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
+    let lang = crate::i18n::lang(state.inner());
     let run_id = state.runtime.next_run_id();
     let flag = state.runtime.new_pause_flag();
     state.runtime.paused.lock().unwrap().insert(run_id.clone(), flag);
     state.runtime.running_meta.lock().unwrap().insert(
         run_id.clone(),
         crate::models::RunningMeta {
-            target: format!("临时: {}", cmd),
+            target: crate::i18n::trf(&lang, "临时: {cmd}", &[("cmd", &cmd)]),
             started_at: state.local_now(),
             command_id: None,
             pipeline_id: None,
@@ -180,7 +182,8 @@ pub fn run_adhoc(
     let state_owned = state.inner().clone();
     thread::spawn(move || {
         wait_if_paused(&state_owned, &rid);
-        let _ = run_shell(app, &state_owned, &rid, &cmd, &cwd, &shell, 0, "临时命令");
+        let label = crate::i18n::tr(&lang, "临时命令");
+        let _ = run_shell(app, &state_owned, &rid, &cmd, &cwd, &shell, 0, &label);
         state_owned.runtime.paused.lock().unwrap().remove(&rid);
     });
     Ok(run_id)

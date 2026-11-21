@@ -78,16 +78,17 @@ pub fn run_compression(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let conn = state.conn()?;
+    let lang = crate::i18n::lang(state.inner());
     let (params_json, script_id): (String, Option<i64>) = conn
         .query_row(
             "SELECT params_json, script_id FROM compression_profiles WHERE id=?1",
             [profile_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .map_err(|e| format!("预设不存在: {}", e))?;
+        .map_err(|e| crate::i18n::trf(&lang, "预设不存在: {error}", &[("error", &e.to_string())]))?;
 
     let mut params: serde_json::Value =
-        serde_json::from_str(&params_json).map_err(|e| format!("参数格式错误: {}", e))?;
+        serde_json::from_str(&params_json).map_err(|e| crate::i18n::trf(&lang, "参数格式错误: {error}", &[("error", &e.to_string())]))?;
     if let Some(obj) = params.as_object_mut() {
         obj.insert(
             "input_paths".into(),
@@ -118,14 +119,14 @@ pub fn run_compression(
                     }
                 },
             )
-            .map_err(|e| format!("读取脚本失败: {}", e))?,
+            .map_err(|e| crate::i18n::trf(&lang, "读取脚本失败: {error}", &[("error", &e.to_string())]))?,
         None => conn
             .query_row(
                 "SELECT content FROM scripts WHERE name='内置图片压缩脚本'",
                 [],
                 |r| r.get(0),
             )
-            .map_err(|e| format!("读取内置脚本失败: {}", e))?,
+            .map_err(|e| crate::i18n::trf(&lang, "读取内置脚本失败: {error}", &[("error", &e.to_string())]))?,
     };
 
     let work_dir = state
@@ -137,20 +138,20 @@ pub fn run_compression(
 
     let script_path = work_dir.join("compress_images.py");
     let config_path = work_dir.join("config.json");
-    fs::write(&script_path, &script_source).map_err(|e| format!("写入脚本失败: {}", e))?;
+    fs::write(&script_path, &script_source).map_err(|e| crate::i18n::trf(&lang, "写入脚本失败: {error}", &[("error", &e.to_string())]))?;
     fs::write(&config_path, serde_json::to_string_pretty(&params).unwrap_or_default())
-        .map_err(|e| format!("写入配置失败: {}", e))?;
+        .map_err(|e| crate::i18n::trf(&lang, "写入配置失败: {error}", &[("error", &e.to_string())]))?;
 
     let run_id = state.runtime.next_run_id();
     let flag = state.runtime.new_pause_flag();
     state.runtime.paused.lock().unwrap().insert(run_id.clone(), flag);
     let profile_name: String = conn
         .query_row("SELECT name FROM compression_profiles WHERE id=?1", [profile_id], |r| r.get(0))
-        .unwrap_or_else(|_| format!("压缩预设 #{}", profile_id));
+        .unwrap_or_else(|_| crate::i18n::trf(&lang, "压缩预设 #{n}", &[("n", &profile_id.to_string())]));
     state.runtime.running_meta.lock().unwrap().insert(
         run_id.clone(),
         crate::models::RunningMeta {
-            target: format!("图片压缩: {}", profile_name),
+            target: crate::i18n::trf(&lang, "图片压缩: {name}", &[("name", &profile_name)]),
             started_at: state.local_now(),
             command_id: None,
             pipeline_id: None,
@@ -179,11 +180,12 @@ pub fn run_compression(
         let _ = tauri::Emitter::emit(&app_move, "run://log", LogEvent {
             run_id: rid.clone(),
             stream: "info".into(),
-            line: "开始压缩...".into(),
+            line: crate::i18n::tr(&lang, "开始压缩..."),
         });
         let mut proc_cmd = std::process::Command::new(&py);
         proc_cmd.arg(&script_str).arg("--config").arg(&config_str);
-        let result = execute(app_move.clone(), &state_owned, &rid, &mut proc_cmd, 0, "图片压缩");
+        let title = crate::i18n::tr(&lang, "图片压缩");
+        let result = execute(app_move.clone(), &state_owned, &rid, &mut proc_cmd, 0, &title);
         let status = match result {
             Ok((code, _)) => code,
             Err(e) => {

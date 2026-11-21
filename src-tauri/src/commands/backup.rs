@@ -24,6 +24,7 @@ const BUILTIN_BACKUP_FALLBACK: &str = include_str!("../../../scripts/backup_db.p
 #[tauri::command]
 pub fn run_backup(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
     let conn = state.conn()?;
+    let lang = crate::i18n::lang(state.inner());
 
     // 从数据库读内置脚本源码；读不到则用编译进二进制的副本兜底
     let script_source: String = conn
@@ -67,12 +68,13 @@ pub fn run_backup(app: AppHandle, state: State<'_, AppState>) -> Result<String, 
     let work_dir = app
         .path()
         .app_data_dir()
-        .map_err(|e| format!("无法获取数据目录: {}", e))?
+        .map_err(|e| crate::i18n::trf(&lang, "无法获取数据目录: {error}", &[("error", &e.to_string())]))?
         .join("backup_work");
-    fs::create_dir_all(&work_dir).map_err(|e| format!("创建工作目录失败: {}", e))?;
+    fs::create_dir_all(&work_dir)
+        .map_err(|e| crate::i18n::trf(&lang, "创建工作目录失败: {error}", &[("error", &e.to_string())]))?;
     let script_path = work_dir.join("backup_db.py");
     fs::write(&script_path, &script_source)
-        .map_err(|e| format!("写入备份脚本失败: {}", e))?;
+        .map_err(|e| crate::i18n::trf(&lang, "写入备份脚本失败: {error}", &[("error", &e.to_string())]))?;
 
     let run_id = state.runtime.next_run_id();
     let flag = state.runtime.new_pause_flag();
@@ -80,7 +82,7 @@ pub fn run_backup(app: AppHandle, state: State<'_, AppState>) -> Result<String, 
     state.runtime.running_meta.lock().unwrap().insert(
         run_id.clone(),
         crate::models::RunningMeta {
-            target: "数据库备份".into(),
+            target: crate::i18n::tr(&lang, "数据库备份"),
             started_at: state.local_now(),
             command_id: None,
             pipeline_id: None,
@@ -110,7 +112,7 @@ pub fn run_backup(app: AppHandle, state: State<'_, AppState>) -> Result<String, 
         let _ = tauri::Emitter::emit(&app_move, "run://log", LogEvent {
             run_id: rid.clone(),
             stream: "info".into(),
-            line: "开始数据库备份...".into(),
+            line: crate::i18n::tr(&lang, "开始数据库备份..."),
         });
 
         let mut proc_cmd = std::process::Command::new(&py);
@@ -119,7 +121,8 @@ pub fn run_backup(app: AppHandle, state: State<'_, AppState>) -> Result<String, 
             .arg("--db").arg(&db_str)
             .arg("--dir").arg(&backup_dir);
 
-        let result = execute(app_move.clone(), &state_owned, &rid, &mut proc_cmd, 0, "数据库备份");
+        let title = crate::i18n::tr(&lang, "数据库备份");
+        let result = execute(app_move.clone(), &state_owned, &rid, &mut proc_cmd, 0, &title);
         let status = match result {
             Ok((code, stderr)) => {
                 if code != 0 && !stderr.trim().is_empty() {

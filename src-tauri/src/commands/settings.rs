@@ -11,9 +11,13 @@ use crate::state::AppState;
 /// 避免浅色主题下顶部标题栏仍是深色、以及缩放时露出深色底。
 #[tauri::command]
 pub fn set_window_theme(theme: String, app: tauri::AppHandle) -> Result<(), String> {
+    let lang = app
+        .try_state::<AppState>()
+        .map(|s| crate::i18n::lang(s.inner()))
+        .unwrap_or_else(|| "zh-CN".to_string());
     let win = app
         .get_webview_window("main")
-        .ok_or_else(|| "找不到主窗口".to_string())?;
+        .ok_or_else(|| crate::i18n::tr(&lang, "找不到主窗口"))?;
     let is_light = theme == "light";
     let t = if is_light { Theme::Light } else { Theme::Dark };
     win.set_theme(Some(t)).map_err(|e| e.to_string())?;
@@ -58,10 +62,11 @@ pub fn set_setting(key: String, value: String, state: State<'_, AppState>) -> Re
 /// 当前数据库文件所在目录。
 #[tauri::command]
 pub fn data_dir(state: State<'_, AppState>) -> Result<String, String> {
+    let lang = crate::i18n::lang(state.inner());
     let parent = state
         .db_path
         .parent()
-        .ok_or_else(|| "无法确定数据目录".to_string())?;
+        .ok_or_else(|| crate::i18n::tr(&lang, "无法确定数据目录"))?;
     Ok(parent.to_string_lossy().to_string())
 }
 
@@ -134,6 +139,7 @@ pub fn get_default_backup_dir() -> Result<String, String> {
 /// 列出备份目录里的 runhelp_*.db 文件，按修改时间倒序。
 #[tauri::command]
 pub fn list_backups(state: State<'_, AppState>) -> Result<Vec<BackupInfo>, String> {
+    let lang = crate::i18n::lang(state.inner());
     let dir = resolve_backup_dir(&state);
     if !dir.is_dir() {
         return Ok(Vec::new());
@@ -142,7 +148,7 @@ pub fn list_backups(state: State<'_, AppState>) -> Result<Vec<BackupInfo>, Strin
         .or_else(|_| std::env::var("HOSTNAME"))
         .unwrap_or_default();
     let mut files: Vec<BackupInfo> = Vec::new();
-    let entries = fs::read_dir(&dir).map_err(|e| format!("读取备份目录失败: {}", e))?;
+    let entries = fs::read_dir(&dir).map_err(|e| crate::i18n::trf(&lang, "读取备份目录失败: {error}", &[("error", &e.to_string())]))?;
     for entry in entries.flatten() {
         let p = entry.path();
         if !p.is_file() {
@@ -201,17 +207,22 @@ pub fn list_backups(state: State<'_, AppState>) -> Result<Vec<BackupInfo>, Strin
 /// 5. 写回后立即调用 db::init_db，把旧结构自动升级到当前版本，无需重启
 #[tauri::command]
 pub fn restore_backup(name: String, state: State<'_, AppState>) -> Result<String, String> {
+    let lang = crate::i18n::lang(state.inner());
     let dir = resolve_backup_dir(&state);
     // 防目录穿越：只接受纯文件名
     if name.contains('/') || name.contains('\\') || name.contains("..") {
-        return Err("备份名称非法".into());
+        return Err(crate::i18n::tr(&lang, "备份名称非法"));
     }
     if !name.starts_with("runhelp_") || !name.ends_with(".db") {
-        return Err("只可恢复 runhelp_*.db 备份文件".into());
+        return Err(crate::i18n::tr(&lang, "只可恢复 runhelp_*.db 备份文件"));
     }
     let backup_path = dir.join(&name);
     if !backup_path.is_file() {
-        return Err(format!("备份文件不存在: {}", backup_path.to_string_lossy()));
+        return Err(crate::i18n::trf(
+            &lang,
+            "备份文件不存在: {path}",
+            &[("path", &backup_path.to_string_lossy().to_string())],
+        ));
     }
 
     // 校验备份完整性（只读打开，避免 WAL 副作用）
@@ -220,12 +231,12 @@ pub fn restore_backup(name: String, state: State<'_, AppState>) -> Result<String
             &backup_path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
-        .map_err(|e| format!("无法打开备份: {}", e))?;
+        .map_err(|e| crate::i18n::trf(&lang, "无法打开备份: {error}", &[("error", &e.to_string())]))?;
         let check: String = src
             .query_row("PRAGMA integrity_check", [], |r| r.get(0))
-            .map_err(|e| format!("备份校验失败: {}", e))?;
+            .map_err(|e| crate::i18n::trf(&lang, "备份校验失败: {error}", &[("error", &e.to_string())]))?;
         if check != "ok" {
-            return Err(format!("备份文件已损坏: {}", check));
+            return Err(crate::i18n::trf(&lang, "备份文件已损坏: {check}", &[("check", &check)]));
         }
     }
 
@@ -242,7 +253,7 @@ pub fn restore_backup(name: String, state: State<'_, AppState>) -> Result<String
         stamp
     ));
     fs::copy(current, &safety)
-        .map_err(|e| format!("备份当前库失败（已中止恢复）: {}", e))?;
+        .map_err(|e| crate::i18n::trf(&lang, "备份当前库失败（已中止恢复）: {error}", &[("error", &e.to_string())]))?;
 
     // 用 SQLite backup API 写回：源=备份，目标=当前库
     {
@@ -250,23 +261,26 @@ pub fn restore_backup(name: String, state: State<'_, AppState>) -> Result<String
             &backup_path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
-        .map_err(|e| format!("打开备份失败: {}", e))?;
+        .map_err(|e| crate::i18n::trf(&lang, "打开备份失败: {error}", &[("error", &e.to_string())]))?;
         let mut dst = rusqlite::Connection::open(current)
-            .map_err(|e| format!("打开当前库失败: {}", e))?;
+            .map_err(|e| crate::i18n::trf(&lang, "打开当前库失败: {error}", &[("error", &e.to_string())]))?;
         let backup = rusqlite::backup::Backup::new(&src, &mut dst)
-            .map_err(|e| format!("初始化恢复失败: {}", e))?;
+            .map_err(|e| crate::i18n::trf(&lang, "初始化恢复失败: {error}", &[("error", &e.to_string())]))?;
         backup
             .run_to_completion(100, std::time::Duration::from_millis(250), None)
-            .map_err(|e| format!("恢复写入失败: {}", e))?;
+            .map_err(|e| crate::i18n::trf(&lang, "恢复写入失败: {error}", &[("error", &e.to_string())]))?;
     }
 
     // 旧备份可能缺少新版本的表/列。写回后立刻跑一次迁移，避免用户不重启就
     // 用旧结构触发 SQL 报错；迁移前会再留一份快照，且迁移本身是幂等的。
-    crate::db::init_db(current).map_err(|e| format!("恢复成功，但自动升级结构失败: {}", e))?;
+    crate::db::init_db(current).map_err(|e| crate::i18n::trf(&lang, "恢复成功，但自动升级结构失败: {error}", &[("error", &e.to_string())]))?;
 
-    Ok(format!(
-        "已从 [{}] 恢复并自动升级到当前结构。当前库已先备份为 {}。",
-        name,
-        safety.file_name().unwrap_or_default().to_string_lossy()
+    Ok(crate::i18n::trf(
+        &lang,
+        "已从 [{name}] 恢复并自动升级到当前结构。当前库已先备份为 {file}。",
+        &[
+            ("name", &name),
+            ("file", &safety.file_name().unwrap_or_default().to_string_lossy().to_string()),
+        ],
     ))
 }

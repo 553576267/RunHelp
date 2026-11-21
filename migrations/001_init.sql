@@ -88,3 +88,4 @@ INSERT OR IGNORE INTO settings(key, value) VALUES ('python_path', 'python');
 INSERT OR IGNORE INTO settings(key, value) VALUES ('default_shell', 'powershell');
 INSERT OR IGNORE INTO settings(key, value) VALUES ('theme', 'dark');
 INSERT OR IGNORE INTO settings(key, value) VALUES ('notify_on_success', '1');
+INSERT OR IGNORE INTO settings(key, value) VALUES ('language', 'zh-CN');

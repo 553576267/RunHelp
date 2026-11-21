@@ -109,6 +109,7 @@ fn emit_line(app: &AppHandle, run_id: &str, stream: &str, line: String) {
 /// 这样子进程里的 `python` / `pip` / `uvicorn` 都解析到用户指定的环境，
 /// 避免 App 继承父进程（如 WorkBuddy）PATH 时用错解释器（典型报错：No module named 'fastapi'）。
 fn apply_python_path(state: &AppState, proc_cmd: &mut ProcCommand) -> String {
+    let lang = crate::i18n::lang(state);
     let python_path = state
         .conn()
         .ok()
@@ -131,7 +132,11 @@ fn apply_python_path(state: &AppState, proc_cmd: &mut ProcCommand) -> String {
     }
     let p = Path::new(trimmed);
     if !p.exists() {
-        return format!("━━━ 【RunHelp】解释器: {} (路径不存在) ━━━", trimmed);
+        return crate::i18n::trf(
+            &lang,
+            "━━━ 【RunHelp】解释器: {path} (路径不存在) ━━━",
+            &[("path", trimmed)],
+        );
     }
     let dir = if p.is_file() {
         match p.parent() {
@@ -167,7 +172,7 @@ fn apply_python_path(state: &AppState, proc_cmd: &mut ProcCommand) -> String {
     parts.insert(1, scripts_dir.clone());
     let new_path = parts.join(";");
     proc_cmd.env("PATH", new_path);
-    format!("━━━ 【RunHelp】解释器: {} ━━━", trimmed)
+    crate::i18n::trf(&lang, "━━━ 【RunHelp】解释器: {path} ━━━", &[("path", trimmed)])
 }
 
 /// 字节级无损读取一个输出流：按 \n 切块，用 Utf8StreamDecoder 容错解码后 emit。
@@ -220,6 +225,7 @@ pub fn execute(
     timeout_ms: i64,
     title: &str,
 ) -> Result<(i32, String), String> {
+    let lang = crate::i18n::lang(state);
     proc_cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -248,7 +254,11 @@ pub fn execute(
             // spawn 失败会绕过函数末尾的统一清理，这里主动清掉运行态，
             // 避免前端留下永远不会消失的"幽灵角标"和卡住的暂停标志。
             state.runtime.running_meta.lock().unwrap().remove(run_id);
-            return Err(format!("启动进程失败: {}", e));
+            return Err(crate::i18n::trf(
+                &lang,
+                "启动进程失败: {error}",
+                &[("error", &e.to_string())],
+            ));
         }
     };
     let pid = child.id();
@@ -307,7 +317,11 @@ pub fn execute(
                 // 同上：异常返回前清理运行态，保证角标不残留
                 state.runtime.children.lock().unwrap().remove(run_id);
                 state.runtime.running_meta.lock().unwrap().remove(run_id);
-                return Err(format!("等待进程失败: {}", e));
+                return Err(crate::i18n::trf(
+                    &lang,
+                    "等待进程失败: {error}",
+                    &[("error", &e.to_string())],
+                ));
             }
         }
     };
@@ -346,7 +360,7 @@ pub fn execute(
         "failed"
     };
     if timed_out {
-        emit_line(&app, run_id, "stderr", "命令超时，已强制终止".into());
+        emit_line(&app, run_id, "stderr", crate::i18n::tr(&lang, "命令超时，已强制终止"));
     }
     let stderr_text = stderr_buf.lock().unwrap().clone();
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -375,6 +389,7 @@ pub fn run_shell(
     timeout_ms: i64,
     label: &str,
 ) -> Result<(i32, String), String> {
+    let lang = crate::i18n::lang(state);
     let (program, args) = shell_command(shell, cmd);
     let mut proc_cmd = ProcCommand::new(program);
     proc_cmd.args(&args);
@@ -386,18 +401,18 @@ pub fn run_shell(
     }
     // 统一输出模板：开始横幅（带命令描述）→ 解释器行 → 命令描述 + 回显 → 结果描述
     let title = if label.trim().is_empty() {
-        "━━━ 【RunHelp】开始执行 ━━━".to_string()
+        crate::i18n::tr(&lang, "━━━ 【RunHelp】开始执行 ━━━")
     } else {
-        format!("━━━ 【RunHelp】开始执行：{} ━━━", label)
+        crate::i18n::trf(&lang, "━━━ 【RunHelp】开始执行：{label} ━━━", &[("label", label)])
     };
     emit_line(&app, run_id, "info", title);
     let diag = apply_python_path(state, &mut proc_cmd);
     if !diag.is_empty() {
         emit_line(&app, run_id, "info", diag);
     }
-    emit_line(&app, run_id, "info", "【RunHelp】执行命令：".into());
+    emit_line(&app, run_id, "info", crate::i18n::tr(&lang, "【RunHelp】执行命令："));
     emit_line(&app, run_id, "stdout", format!("$ {}", cmd));
-    emit_line(&app, run_id, "info", "【RunHelp】执行结果：".into());
+    emit_line(&app, run_id, "info", crate::i18n::tr(&lang, "【RunHelp】执行结果："));
     execute(app, state, run_id, &mut proc_cmd, timeout_ms, label)
 }
 

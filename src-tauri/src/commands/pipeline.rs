@@ -129,9 +129,10 @@ pub fn save_pipeline_steps(
 #[tauri::command]
 pub fn run_pipeline(pipeline_id: i64, app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
     let conn = state.conn()?;
+    let lang = crate::i18n::lang(state.inner());
     let project_id: i64 = conn
         .query_row("SELECT project_id FROM pipelines WHERE id=?1", [pipeline_id], |r| r.get(0))
-        .map_err(|e| format!("流水线不存在: {}", e))?;
+        .map_err(|e| crate::i18n::trf(&lang, "流水线不存在: {error}", &[("error", &e.to_string())]))?;
     let project_path: String = conn
         .query_row("SELECT path FROM projects WHERE id=?1", [project_id], |r| r.get(0))
         .unwrap_or_default();
@@ -166,11 +167,11 @@ pub fn run_pipeline(pipeline_id: i64, app: AppHandle, state: State<'_, AppState>
     state.runtime.paused.lock().unwrap().insert(run_id.clone(), flag);
     let pipeline_name: String = conn
         .query_row("SELECT name FROM pipelines WHERE id=?1", [pipeline_id], |r| r.get(0))
-        .unwrap_or_else(|_| format!("流水线 #{}", pipeline_id));
+        .unwrap_or_else(|_| crate::i18n::trf(&lang, "流水线 #{n}", &[("n", &pipeline_id.to_string())]));
     state.runtime.running_meta.lock().unwrap().insert(
         run_id.clone(),
         crate::models::RunningMeta {
-            target: format!("流水线: {}", pipeline_name),
+            target: crate::i18n::trf(&lang, "流水线: {name}", &[("name", &pipeline_name)]),
             started_at: state.local_now(),
             command_id: None,
             pipeline_id: Some(pipeline_id),
@@ -216,11 +217,11 @@ pub fn run_pipeline(pipeline_id: i64, app: AppHandle, state: State<'_, AppState>
                 let _ = tauri::Emitter::emit(&app, "run://log", crate::models::LogEvent {
                     run_id: rid.clone(),
                     stream: "info".into(),
-                    line: format!("步骤 {}: 执行中", idx + 1),
+                    line: crate::i18n::trf(&lang, "步骤 {n}: 执行中", &[("n", &(idx + 1).to_string())]),
                 });
                 let step_label = m_name.clone().unwrap_or_default();
                 let step_label = if step_label.trim().is_empty() {
-                    format!("步骤 {}", idx + 1)
+                    crate::i18n::trf(&lang, "步骤 {n}", &[("n", &(idx + 1).to_string())])
                 } else {
                     step_label
                 };
@@ -238,10 +239,19 @@ pub fn run_pipeline(pipeline_id: i64, app: AppHandle, state: State<'_, AppState>
                     Ok((code, _)) => code != 0,
                     Err(_) => true,
                 };
+                let result_text = if failed {
+                    crate::i18n::tr(&lang, "失败")
+                } else {
+                    crate::i18n::tr(&lang, "成功")
+                };
                 let _ = tauri::Emitter::emit(&app, "run://log", crate::models::LogEvent {
                     run_id: rid.clone(),
                     stream: "info".into(),
-                    line: format!("步骤 {} 完成: {}", idx + 1, if failed { "失败" } else { "成功" }),
+                    line: crate::i18n::trf(
+                        &lang,
+                        "步骤 {n} 完成: {result}",
+                        &[("n", &(idx + 1).to_string()), ("result", &result_text)],
+                    ),
                 });
                 if failed && on_error == "stop" {
                     aborted = true;

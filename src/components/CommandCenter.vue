@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, inject, computed, onMounted, onUnmounted } from 'vue';
 import { api } from '../lib/api';
+import { t } from '../lib/i18n';
 import type { Project, Command, RunningInfo, Pipeline } from '../types';
 import PipelineEditor from './PipelineEditor.vue';
 
@@ -122,7 +123,7 @@ function openEdit(c: Command) {
 
 async function saveCommand() {
   if (!props.project || !form.value.name.trim() || !form.value.cmd.trim()) {
-    notify('请填写命令名称和内容');
+    notify(t('请填写命令名称和内容'));
     return;
   }
   try {
@@ -135,14 +136,14 @@ async function saveCommand() {
     });
     await load();
     showCommandModal.value = false;
-    notify('命令已保存');
+    notify(t('命令已保存'));
   } catch (e) {
-    notify(`保存失败: ${e}`);
+    notify(t('保存失败: {error}', { error: String(e) }));
   }
 }
 
 async function removeCommand(c: Command) {
-  if (!(await confirm(`删除命令「${c.name}」？`, { title: '删除命令', danger: true, confirmText: '删除' }))) return;
+  if (!(await confirm(t('删除命令「{name}」？', { name: c.name }), { title: t('删除命令'), danger: true, confirmText: t('删除') }))) return;
   await api.deleteCommand(c.id);
   await load();
 }
@@ -155,9 +156,9 @@ async function run(c: Command) {
   try {
     const id = await api.runCommand(c.id);
     emit('run', id);
-    notify(`已启动: ${c.name}，可在「全局任务」页终止`);
+    notify(t('已启动: {name}，可在「全局任务」页终止', { name: c.name }));
   } catch (e) {
-    notify(`启动失败: ${e}`);
+    notify(t('启动失败: {error}', { error: String(e) }));
   }
 }
 
@@ -169,7 +170,7 @@ onUnmounted(() => {
 async function runAdhoc() {
   const cmd = adhoc.value.cmd.trim();
   if (!cmd) {
-    notify('请输入命令');
+    notify(t('请输入命令'));
     return;
   }
   // 工作目录：填了就用（相对路径拼到项目根），没填用项目根
@@ -187,15 +188,15 @@ async function runAdhoc() {
     const id = await api.runAdhoc(cmd, cwd, adhoc.value.shell);
     showAdhoc.value = false;
     emit('run', id);
-    notify('临时命令已启动，可在「全局任务」页终止');
+    notify(t('临时命令已启动，可在「全局任务」页终止'));
   } catch (e) {
-    notify(`启动失败: ${e}`);
+    notify(t('启动失败: {error}', { error: String(e) }));
   }
 }
 
 function onPipelineRun(id: string) {
   emit('run', id);
-  notify('流水线已启动，可在「全局任务」页终止');
+  notify(t('流水线已启动，可在「全局任务」页终止'));
 }
 
 // 新建：以空编辑器打开
@@ -219,15 +220,15 @@ async function runPipeline(p: Pipeline) {
     const id = await api.runPipeline(p.id);
     onPipelineRun(id);
   } catch (e) {
-    notify(`启动失败: ${e}`);
+    notify(t('启动失败: {error}', { error: String(e) }));
   }
 }
 
 async function removePipeline(p: Pipeline) {
-  if (!(await confirm(`删除流水线「${p.name}」？`, { title: '删除流水线', danger: true, confirmText: '删除' }))) return;
+  if (!(await confirm(t('删除流水线「{name}」？', { name: p.name }), { title: t('删除流水线'), danger: true, confirmText: t('删除') }))) return;
   await api.deletePipeline(p.id);
   await load();
-  notify('流水线已删除');
+  notify(t('流水线已删除'));
 }
 
 </script>
@@ -237,48 +238,48 @@ async function removePipeline(p: Pipeline) {
     <template v-if="project">
       <div class="page-head">
         <div>
-          <h2>命令中心</h2>
+          <h2>{{ t('命令中心') }}</h2>
           <p class="muted">{{ project.name }} · {{ project.path }}</p>
         </div>
         <div class="row" style="gap: 8px">
-          <button class="btn" @click="showAdhoc = true">临时命令</button>
-          <button class="btn" @click="openNewPipeline">新建流水线</button>
-          <button class="btn btn-create" @click="openCreate">新建命令</button>
+          <button class="btn" @click="showAdhoc = true">{{ t('临时命令') }}</button>
+          <button class="btn" @click="openNewPipeline">{{ t('新建流水线') }}</button>
+          <button class="btn btn-create" @click="openCreate">{{ t('新建命令') }}</button>
         </div>
       </div>
 
       <div class="cmd-grid">
-        <div v-for="c in commands" :key="c.id" class="card cmd-card" title="双击编辑命令" @dblclick.prevent="openEdit(c)">
+        <div v-for="c in commands" :key="c.id" class="card cmd-card" :title="t('双击编辑命令')" @dblclick.prevent="openEdit(c)">
           <div class="cmd-title">
-            <span class="tag" :class="c.type">{{ c.type === 'install' ? '安装' : c.type === 'build' ? '构建' : c.type === 'run' ? '运行' : '自定义' }}</span>
+            <span class="tag" :class="c.type">{{ c.type === 'install' ? t('安装') : c.type === 'build' ? t('构建') : c.type === 'run' ? t('运行') : t('自定义') }}</span>
             <strong :title="c.name">{{ c.name }}</strong>
           </div>
           <div class="cmd-line mono" :title="c.cmd">{{ c.cmd }}</div>
           <div class="cmd-meta muted">
             <span>Shell: {{ c.shell }}</span>
-            <span v-if="c.cwd" :title="c.cwd">目录: {{ c.cwd }}</span>
-            <span v-if="c.timeout_ms">超时: {{ c.timeout_ms / 1000 }}s</span>
+            <span v-if="c.cwd" :title="c.cwd">{{ t('目录') }}: {{ c.cwd }}</span>
+            <span v-if="c.timeout_ms">{{ t('超时') }}: {{ c.timeout_ms / 1000 }}s</span>
           </div>
           <div class="cmd-actions">
             <span
               v-if="(runningCount.get(c.id) ?? 0) > 0"
               class="run-badge"
-              :title="`${runningCount.get(c.id)} 个实例运行中，可在「全局任务」终止`"
+              :title="t('{count} 个实例运行中，可在「全局任务」终止', { count: runningCount.get(c.id) ?? 0 })"
             >
               <span class="run-dot"></span>
               <span class="run-num">{{ runningCount.get(c.id) }}</span>
             </span>
-            <button class="act act-edit" title="编辑" @click="openEdit(c)">
+            <button class="act act-edit" :title="t('编辑')" @click="openEdit(c)">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
               </svg>
             </button>
-            <button class="act act-del" title="删除" @click="removeCommand(c)" @dblclick.stop>
+            <button class="act act-del" :title="t('删除')" @click="removeCommand(c)" @dblclick.stop>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M3 6h18" /><path d="M8 6V4h8v2" /><path d="M19 6l-1 14H6L5 6" /><path d="M10 11v6M14 11v6" />
               </svg>
             </button>
-            <button class="act act-run" :disabled="startingIds.has(`c:${c.id}`)" :title="startingIds.has(`c:${c.id}`) ? '启动中…' : '运行'" @click="run(c)" @dblclick.stop>
+            <button class="act act-run" :disabled="startingIds.has(`c:${c.id}`)" :title="startingIds.has(`c:${c.id}`) ? t('启动中…') : t('运行')" @click="run(c)" @dblclick.stop>
               <svg v-if="startingIds.has(`c:${c.id}`)" class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
                 <path d="M12 3a9 9 0 1 0 9 9" />
               </svg>
@@ -289,34 +290,34 @@ async function removePipeline(p: Pipeline) {
       </div>
 
       <div v-if="pipelines.length" class="pipe-section">
-        <h3 class="section-title">流水线 <span class="muted">{{ pipelines.length }}</span></h3>
+        <h3 class="section-title">{{ t('流水线') }} <span class="muted">{{ pipelines.length }}</span></h3>
         <div class="cmd-grid">
-          <div v-for="p in pipelines" :key="p.id" class="card cmd-card pipe-card" title="双击编辑流水线" @dblclick.prevent="openEditPipeline(p)">
+          <div v-for="p in pipelines" :key="p.id" class="card cmd-card pipe-card" :title="t('双击编辑流水线')" @dblclick.prevent="openEditPipeline(p)">
             <div class="cmd-title">
-              <span class="tag pipe-tag">流水线</span>
+              <span class="tag pipe-tag">{{ t('流水线') }}</span>
               <strong :title="p.name">{{ p.name }}</strong>
             </div>
-            <div class="pipe-desc" :title="p.description || '暂无描述'">{{ p.description || '暂无描述' }}</div>
+            <div class="pipe-desc" :title="p.description || t('暂无描述')">{{ p.description || t('暂无描述') }}</div>
             <div class="cmd-actions">
               <span
                 v-if="(pipelineRunningCount.get(p.id) ?? 0) > 0"
                 class="run-badge"
-                :title="`${pipelineRunningCount.get(p.id)} 个实例运行中，可在「全局任务」终止`"
+                :title="t('{count} 个实例运行中，可在「全局任务」终止', { count: pipelineRunningCount.get(p.id) ?? 0 })"
               >
                 <span class="run-dot"></span>
                 <span class="run-num">{{ pipelineRunningCount.get(p.id) }}</span>
               </span>
-              <button class="act act-edit" title="编辑" @click="openEditPipeline(p)">
+              <button class="act act-edit" :title="t('编辑')" @click="openEditPipeline(p)">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
                 </svg>
               </button>
-              <button class="act act-del" title="删除" @click="removePipeline(p)" @dblclick.stop>
+              <button class="act act-del" :title="t('删除')" @click="removePipeline(p)" @dblclick.stop>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M3 6h18" /><path d="M8 6V4h8v2" /><path d="M19 6l-1 14H6L5 6" /><path d="M10 11v6M14 11v6" />
                 </svg>
               </button>
-              <button class="act act-run" :disabled="startingIds.has(`p:${p.id}`)" :title="startingIds.has(`p:${p.id}`) ? '启动中…' : '运行'" @click="runPipeline(p)" @dblclick.stop>
+              <button class="act act-run" :disabled="startingIds.has(`p:${p.id}`)" :title="startingIds.has(`p:${p.id}`) ? t('启动中…') : t('运行')" @click="runPipeline(p)" @dblclick.stop>
                 <svg v-if="startingIds.has(`p:${p.id}`)" class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
                   <path d="M12 3a9 9 0 1 0 9 9" />
                 </svg>
@@ -330,16 +331,16 @@ async function removePipeline(p: Pipeline) {
 
     <div v-else class="empty">
       <div class="big">▸</div>
-      <div>请先在左侧选择或新建一个开发项目</div>
+      <div>{{ t('请先在左侧选择或新建一个开发项目') }}</div>
     </div>
 
     <!-- 临时命令弹窗（替代原先常驻的顶部面板） -->
     <div v-if="showAdhoc" class="modal-mask" @click.self="showAdhoc = false">
       <div class="modal" role="dialog" aria-modal="true">
-        <h3>临时命令</h3>
-        <p class="muted adhoc-tip">直接输入命令运行，不保存。例如：python server.py</p>
+        <h3>{{ t('临时命令') }}</h3>
+        <p class="muted adhoc-tip">{{ t('直接输入命令运行，不保存。例如：python server.py') }}</p>
         <div class="field">
-          <label>命令内容</label>
+          <label>{{ t('命令内容') }}</label>
           <input
             v-model="adhoc.cmd"
             class="input mono"
@@ -357,41 +358,41 @@ async function removePipeline(p: Pipeline) {
             </select>
           </div>
           <div class="field">
-            <label>工作目录（相对项目路径，留空用项目根）</label>
+            <label>{{ t('工作目录（相对项目路径，留空用项目根）') }}</label>
             <input
               v-model="adhoc.cwd"
               class="input mono"
-              placeholder="留空或 frontend"
-              title="相对项目路径的子目录，留空用项目根"
+              :placeholder="t('留空或 frontend')"
+              :title="t('相对项目路径的子目录，留空用项目根')"
             />
           </div>
         </div>
         <div class="modal-actions">
-          <button class="btn" @click="showAdhoc = false">取消</button>
-          <button class="btn primary" @click="runAdhoc">运行</button>
+          <button class="btn" @click="showAdhoc = false">{{ t('取消') }}</button>
+          <button class="btn primary" @click="runAdhoc">{{ t('运行') }}</button>
         </div>
       </div>
     </div>
 
     <div v-if="showCommandModal" class="modal-mask" @click.self="showCommandModal = false">
       <div class="modal">
-        <h3>{{ editing ? '编辑命令' : '新建命令' }}</h3>
+        <h3>{{ editing ? t('编辑命令') : t('新建命令') }}</h3>
         <div class="field">
-          <label>命令名称</label>
-          <input v-model="form.name" class="input" placeholder="例如：安装依赖" />
+          <label>{{ t('命令名称') }}</label>
+          <input v-model="form.name" class="input" :placeholder="t('例如：安装依赖')" />
         </div>
         <div class="field" style="margin-top: 14px">
-          <label>命令内容</label>
+          <label>{{ t('命令内容') }}</label>
           <textarea v-model="form.cmd" class="textarea" rows="3" placeholder="npm install"></textarea>
         </div>
         <div class="row" style="margin-top: 14px">
           <div class="field">
-            <label>类型</label>
+            <label>{{ t('类型') }}</label>
             <select v-model="form.type" class="select">
-              <option value="install">安装</option>
-              <option value="build">构建</option>
-              <option value="run">运行</option>
-              <option value="custom">自定义</option>
+              <option value="install">{{ t('安装') }}</option>
+              <option value="build">{{ t('构建') }}</option>
+              <option value="run">{{ t('运行') }}</option>
+              <option value="custom">{{ t('自定义') }}</option>
             </select>
           </div>
           <div class="field">
@@ -405,17 +406,17 @@ async function removePipeline(p: Pipeline) {
         </div>
         <div class="row" style="margin-top: 14px">
           <div class="field">
-            <label>工作目录（相对项目路径，留空用项目根）</label>
-            <input v-model="form.cwd" class="input mono" placeholder="留空或 frontend" />
+            <label>{{ t('工作目录（相对项目路径，留空用项目根）') }}</label>
+            <input v-model="form.cwd" class="input mono" :placeholder="t('留空或 frontend')" />
           </div>
           <div class="field" style="max-width: 150px">
-            <label>超时（毫秒，0=不限）</label>
+            <label>{{ t('超时（毫秒，0=不限）') }}</label>
             <input v-model.number="form.timeout_ms" type="number" class="input" />
           </div>
         </div>
         <div class="modal-actions">
-          <button class="btn" @click="showCommandModal = false">取消</button>
-          <button class="btn primary" @click="saveCommand">保存</button>
+          <button class="btn" @click="showCommandModal = false">{{ t('取消') }}</button>
+          <button class="btn primary" @click="saveCommand">{{ t('保存') }}</button>
         </div>
       </div>
     </div>

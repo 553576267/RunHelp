@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod db;
+pub mod i18n;
 pub mod models;
 pub mod process;
 pub mod state;

@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, provide, computed, watch } from 'vue';
+import { ref, onMounted, onUnmounted, provide, computed, watch, nextTick } from 'vue';
 import { listen } from '@tauri-apps/api/event';
 import { getVersion } from '@tauri-apps/api/app';
-import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open as openUrl } from '@tauri-apps/plugin-shell';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { api } from './lib/api';
+import { t, setLocale } from './lib/i18n';
 import type { Project, LogEvent, RunEndEvent, RunHistory } from './types';
 import ProjectSidebar from './components/ProjectSidebar.vue';
 import CommandCenter from './components/CommandCenter.vue';
@@ -27,6 +27,40 @@ const running = ref<import('./types').RunningInfo[]>([]);
 
 // 底部运行日志：默认收缩为一条标题栏，需要时再展开
 const consoleCollapsed = ref(true);
+
+// 日志面板高度档位：normal(210px) / half(50%) / full(接近全屏，保留标签栏)
+type ConsoleSize = 'normal' | 'half' | 'full';
+const consoleSize = ref<ConsoleSize>('normal');
+// 拖拽调整后的自定义高度（像素），存在时优先生效
+const consoleCustomHeight = ref<number | null>(null);
+const consolePanel = ref<HTMLElement | null>(null);
+const consoleBody = ref<HTMLElement | null>(null);
+
+// 日志自动跟随：新日志到达时若用户正贴着底部则自动滚动，用户上滑后暂停并累计未读
+const FOLLOW_THRESHOLD = 24; // 像素：距底部小于该值视为"在底部"
+const isFollowing = ref(true);
+const unreadLines = ref(0);
+function onConsoleScroll() {
+  const el = consoleBody.value;
+  if (!el) return;
+  const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+  isFollowing.value = distance <= FOLLOW_THRESHOLD;
+  if (isFollowing.value) unreadLines.value = 0;
+}
+function scrollConsoleToBottom() {
+  const el = consoleBody.value;
+  if (!el) return;
+  el.scrollTop = el.scrollHeight;
+  isFollowing.value = true;
+  unreadLines.value = 0;
+}
+// 折叠/展开、切换档位后重新贴底（clientHeight 变化会改变判定）
+function realignFollow() {
+  void nextTick(scrollConsoleToBottom);
+}
+function jumpToLatest() {
+  scrollConsoleToBottom();
+}
 
 // 全局任务刷新：点击后图标转一圈，纯 CSS 动画，几乎不占资源
 const refreshing = ref(false);
@@ -71,22 +105,33 @@ function onWindowResize() {
   resizeTimer = window.setTimeout(() => (resizing.value = false), 180);
 }
 
-// 记住当前选中的项目与页签：右键刷新 / 重新打开后自动恢复
+// 记住当前选中的项目、页签与日志面板状态：右键刷新 / 重新打开后自动恢复
 const UI_STATE_KEY = 'runhelp.ui.state';
+interface UiState {
+  selectedId: number | null;
+  tab: MainTab;
+  consoleCollapsed?: boolean;
+  consoleSize?: ConsoleSize;
+  consoleCustomHeight?: number | null;
+}
 function saveUiState() {
   try {
-    localStorage.setItem(
-      UI_STATE_KEY,
-      JSON.stringify({ selectedId: selected.value?.id ?? null, tab: tab.value })
-    );
+    const state: UiState = {
+      selectedId: selected.value?.id ?? null,
+      tab: tab.value,
+      consoleCollapsed: consoleCollapsed.value,
+      consoleSize: consoleSize.value,
+      consoleCustomHeight: consoleCustomHeight.value,
+    };
+    localStorage.setItem(UI_STATE_KEY, JSON.stringify(state));
   } catch {
     /* localStorage 不可用时忽略 */
   }
 }
-function readUiState(): { selectedId: number | null; tab: MainTab } | null {
+function readUiState(): UiState | null {
   try {
     const raw = localStorage.getItem(UI_STATE_KEY);
-    return raw ? (JSON.parse(raw) as { selectedId: number | null; tab: MainTab }) : null;
+    return raw ? (JSON.parse(raw) as UiState) : null;
   } catch {
     return null;
   }
@@ -94,6 +139,12 @@ function readUiState(): { selectedId: number | null; tab: MainTab } | null {
 // 在 setup 阶段同步读取，避免初始化 watch 提前覆盖掉持久化状态
 const initialUiState = readUiState();
 let uiStateApplied = false;
+// 立即恢复日志面板状态，避免首屏闪烁
+if (initialUiState) {
+  if (typeof initialUiState.consoleCollapsed === 'boolean') consoleCollapsed.value = initialUiState.consoleCollapsed;
+  if (initialUiState.consoleSize) consoleSize.value = initialUiState.consoleSize;
+  if (typeof initialUiState.consoleCustomHeight === 'number') consoleCustomHeight.value = initialUiState.consoleCustomHeight;
+}
 
 provide('notify', (msg: string) => showToast(msg));
 
@@ -118,9 +169,9 @@ function askConfirm(
   return new Promise((resolve) => {
     confirmState.value = {
       message,
-      title: options.title ?? '请确认',
+      title: options.title ?? t('请确认'),
       danger: options.danger ?? false,
-      confirmText: options.confirmText ?? '确认',
+      confirmText: options.confirmText ?? t('确认'),
       resolve,
     };
   });
@@ -145,13 +196,13 @@ async function loadRunning() {
 const availableTabs = computed<{ key: MainTab; label: string }[]>(() => {
   const p = selected.value;
   const globalTabs: { key: MainTab; label: string }[] = [
-    { key: 'tasks', label: '全局任务' },
+    { key: 'tasks', label: t('全局任务') },
   ];
   if (!p) return globalTabs;
   if (p.type === 'image') {
-    return [{ key: 'compress', label: '图片压缩' }, ...globalTabs];
+    return [{ key: 'compress', label: t('图片压缩') }, ...globalTabs];
   }
-  return [{ key: 'commands', label: '命令中心' }, ...globalTabs];
+  return [{ key: 'commands', label: t('命令中心') }, ...globalTabs];
 });
 
 // 全局设置虽不在页签栏，但仍是合法页签（由右上角按钮进入），需参与校验与持久化
@@ -198,7 +249,7 @@ function showToast(msg: string) {
 async function copyLogs() {
   const text = visibleLogs.value.map((l) => l.line).join('\n');
   if (!text) {
-    showToast('当前没有可复制的日志');
+    showToast(t('当前没有可复制的日志'));
     return;
   }
   try {
@@ -215,9 +266,9 @@ async function copyLogs() {
       document.execCommand('copy');
       document.body.removeChild(ta);
     }
-    showToast(`已复制 ${visibleLogs.value.length} 行日志`);
+    showToast(t('已复制 {count} 行日志', { count: visibleLogs.value.length }));
   } catch {
-    showToast('复制失败，请检查剪贴板权限');
+    showToast(t('复制失败，请检查剪贴板权限'));
   }
 }
 
@@ -226,7 +277,7 @@ async function openRepo() {
   try {
     await openUrl('https://gitcode.com/binglengdexie/RunHelp');
   } catch {
-    showToast('打开仓库失败');
+    showToast(t('打开仓库失败'));
   }
 }
 
@@ -281,19 +332,19 @@ async function loadHistory() {
 }
 
 async function clearHistory() {
-  if (!(await askConfirm('确定清空全部运行记录？此操作不可恢复。', { title: '清空运行记录', danger: true, confirmText: '清空' }))) return;
+  if (!(await askConfirm(t('确定清空全部运行记录？此操作不可恢复。'), { title: t('清空运行记录'), danger: true, confirmText: t('清空') }))) return;
   await api.clearHistory();
   await loadHistory();
-  showToast('运行记录已清空');
+  showToast(t('运行记录已清空'));
 }
 
 async function stopRunning(runId: string) {
-  if (!(await askConfirm(`终止运行任务 [${runId}]？将结束对应的进程（含其子进程）。`, { title: '终止运行任务', danger: true, confirmText: '终止' }))) return;
+  if (!(await askConfirm(t('终止运行任务 [{runId}]？将结束对应的进程（含其子进程）。', { runId }), { title: t('终止运行任务'), danger: true, confirmText: t('终止') }))) return;
   try {
     await api.stopRun(runId);
-    showToast(`已终止 [${runId}]`);
+    showToast(t('已终止 [{runId}]', { runId }));
   } catch (e) {
-    showToast(`终止失败: ${e}`);
+    showToast(t('终止失败: {error}', { error: String(e) }));
   }
   setTimeout(loadRunning, 500);
 }
@@ -302,24 +353,52 @@ async function togglePauseRun(r: import('./types').RunningInfo) {
   try {
     if (r.paused) {
       await api.resumeRun(r.run_id);
-      showToast(`[${r.run_id}] 已继续`);
+      showToast(t('[{runId}] 已继续', { runId: r.run_id }));
     } else {
       await api.pauseRun(r.run_id);
-      showToast(`[${r.run_id}] 已请求暂停（当前命令结束后生效）`);
+      showToast(t('[{runId}] 已请求暂停（当前命令结束后生效）', { runId: r.run_id }));
     }
   } catch (e) {
-    showToast(`操作失败: ${e}`);
+    showToast(t('操作失败: {error}', { error: String(e) }));
   }
   setTimeout(loadRunning, 300);
 }
 
+// 统一追加日志：根据跟随状态决定滚到底还是累计未读，再做限流裁剪。
+// 裁剪时补偿 scrollTop，避免用户正在翻历史时因删除旧行导致视口跳变。
+function appendLogs(lines: LogEvent[]) {
+  if (!lines.length) return;
+  const el = consoleBody.value;
+  // 暂停跟随时记录裁剪前状态，裁剪后用像素差补偿 scrollTop，保证视口内容不跳
+  const compensate = !isFollowing.value && el && logs.value.length + lines.length > 1200;
+  const beforeH = compensate ? el!.scrollHeight : 0;
+  const beforeTop = compensate ? el!.scrollTop : 0;
+  const removeCount = logs.value.length + lines.length > 1200
+    ? logs.value.length + lines.length - 800 : 0;
+  if (removeCount > 0) logs.value.splice(0, removeCount);
+  logs.value.push(...lines);
+  if (isFollowing.value) {
+    realignFollow();
+  } else {
+    unreadLines.value += lines.length;
+    if (compensate) {
+      // DOM 更新后：删除掉的旧行高度 = 裁剪前后 scrollHeight 之差
+      void nextTick(() => {
+        const el2 = consoleBody.value;
+        if (!el2) return;
+        const removedPx = beforeH - el2.scrollHeight;
+        el2.scrollTop = Math.max(0, beforeTop - removedPx);
+      });
+    }
+  }
+}
+
 function handleLog(e: LogEvent) {
-  logs.value.push(e);
-  // 限制日志条数，避免长时间运行后 DOM 节点过多推高 WebView2 内存
-  if (logs.value.length > 1200) logs.value.splice(0, 400);
+  appendLogs([e]);
 }
 
 function handleRunEnd(e: RunEndEvent) {
+  const incoming: LogEvent[] = [];
   // 兜底：把进程捕获到的 stderr 补进日志（流式可能已推送过，做去重）。
   if (e.stderr) {
     for (const line of e.stderr.split('\n')) {
@@ -327,25 +406,29 @@ function handleRunEnd(e: RunEndEvent) {
       if (!text) continue;
       const already = logs.value.some(
         (l) => l.run_id === e.run_id && l.stream === 'stderr' && l.line.trimEnd() === text
+      ) || incoming.some(
+        (l) => l.run_id === e.run_id && l.stream === 'stderr' && l.line.trimEnd() === text
       );
-      if (!already) {
-        logs.value.push({ run_id: e.run_id, stream: 'stderr', line: text });
-      }
+      if (!already) incoming.push({ run_id: e.run_id, stream: 'stderr', line: text });
     }
   }
   const label: Record<string, string> = {
-    success: '执行完成',
-    failed: '执行失败',
-    timeout: '执行超时',
-    stopped: '已停止',
+    success: t('执行完成'),
+    failed: t('执行失败'),
+    timeout: t('执行超时'),
+    stopped: t('已停止'),
   };
   const secs = (e.duration_ms / 1000).toFixed(1);
-  logs.value.push({
+  incoming.push({
     run_id: e.run_id,
     stream: 'info',
-    line: `━━━ 【RunHelp】${label[e.status] ?? e.status} · 退出码 ${e.exit_code} · ${secs}s ━━━`,
+    line: t('━━━ 【RunHelp】{label} · 退出码 {exitCode} · {secs}s ━━━', {
+      label: label[e.status] ?? e.status,
+      exitCode: e.exit_code,
+      secs,
+    }),
   });
-  if (logs.value.length > 1200) logs.value.splice(0, 400);
+  appendLogs(incoming);
   void maybeNotifySuccess(e);
   // 运行结束刷新记录（运行记录已移到「全局任务」页）
   loadHistory();
@@ -358,16 +441,17 @@ async function maybeNotifySuccess(e: RunEndEvent) {
   try {
     const settings = await api.getSettings();
     if (settings.notify_on_success === '0') return;
-    const win = getCurrentWindow();
-    // 窗口在前台时用户已经能看到日志，不打扰；最小化或被别的窗口盖住才弹
-    if (await win.isFocused()) return;
+    // 用 document.hasFocus() 而非 Tauri 的 window.isFocused()：后者在 WebView2 上
+    // 依赖窗口事件同步，切换窗口时状态滞后，会出现前台误弹/后台漏弹。
+    // document.hasFocus() 直接反映 WebView 是否持有焦点，最小化或被盖住时为 false。
+    if (document.hasFocus()) return;
     let granted = await isPermissionGranted();
     if (!granted) granted = (await requestPermission()) === 'granted';
     if (!granted) return;
     const secs = (e.duration_ms / 1000).toFixed(1);
     await sendNotification({
-      title: 'RunHelp · 执行完成',
-      body: `${e.title || '任务'} · 耗时 ${secs}s`,
+      title: t('RunHelp · 执行完成'),
+      body: t('{title} · 耗时 {secs}s', { title: e.title || t('任务'), secs }),
     });
   } catch {
     // 通知失败不影响主流程
@@ -379,12 +463,67 @@ function onRun(id: string) {
   setTimeout(loadHistory, 400);
 }
 
-const consoleTitle = computed(() =>
-  activeRunId.value ? `运行日志 · ${activeRunId.value}` : '运行日志'
-);
+// 日志面板档位：点击在 normal → half → full 间循环
+const SIZE_ORDER: ConsoleSize[] = ['normal', 'half', 'full'];
+const sizeLabel = computed(() => ({
+  normal: t('标准'), half: t('半屏'), full: t('全屏'),
+}[consoleSize.value]));
+function cycleConsoleSize() {
+  const idx = SIZE_ORDER.indexOf(consoleSize.value);
+  consoleSize.value = SIZE_ORDER[(idx + 1) % SIZE_ORDER.length];
+  consoleCustomHeight.value = null; // 切档位清除自定义高度
+  if (consoleCollapsed.value) consoleCollapsed.value = false;
+  saveUiState();
+  realignFollow();
+}
+
+// 面板高度样式：自定义高度优先，否则按档位
+const consoleStyle = computed(() => {
+  if (consoleCustomHeight.value != null) return { height: `${consoleCustomHeight.value}px` };
+  if (consoleSize.value === 'half') return { height: '50%' };
+  if (consoleSize.value === 'full') return { height: 'calc(100% - 8px)' };
+  return { height: '210px' };
+});
+
+// 拖拽顶边调整高度：mousemove 跟手，mouseup 落定并持久化
+let resizeCleanup: (() => void) | null = null;
+function onResizeMove(ev: MouseEvent) {
+  const panel = consolePanel.value;
+  const content = panel?.parentElement;
+  if (!panel || !content) return;
+  const rect = content.getBoundingClientRect();
+  const maxH = Math.max(120, rect.height - 80); // 主内容区至少保留 80px
+  // 面板贴着内容区底部，高度 = 底边 - 鼠标Y（往上拖变大）
+  const proposed = Math.min(Math.max(rect.bottom - ev.clientY, 120), maxH);
+  consoleCustomHeight.value = Math.round(proposed);
+}
+function startResize(ev: MouseEvent) {
+  if (consoleCollapsed.value) return;
+  ev.preventDefault();
+  document.body.style.userSelect = 'none';
+  document.body.style.cursor = 'ns-resize';
+  const cleanup = () => {
+    window.removeEventListener('mousemove', onResizeMove);
+    window.removeEventListener('mouseup', onUp);
+    document.body.style.userSelect = '';
+    document.body.style.cursor = '';
+    resizeCleanup = null;
+    saveUiState();
+    realignFollow();
+  };
+  const onUp = () => cleanup();
+  resizeCleanup = cleanup;
+  window.addEventListener('mousemove', onResizeMove);
+  window.addEventListener('mouseup', onUp);
+}
+function clearLogsAndReset() {
+  logs.value = [];
+  unreadLines.value = 0;
+  isFollowing.value = true;
+}
 
 function statusText(s: string) {
-  return { success: '成功', failed: '失败', timeout: '超时', running: '运行中', stopped: '已停止' }[s] ?? s;
+  return { success: t('成功'), failed: t('失败'), timeout: t('超时'), running: t('运行中'), stopped: t('已停止') }[s] ?? s;
 }
 
 onMounted(async () => {
@@ -396,7 +535,9 @@ onMounted(async () => {
     handleRunEnd(e.payload);
     loadRunning();
   });
-  const theme = (await api.getSettings()).theme ?? 'dark';
+  const settings = await api.getSettings();
+  setLocale(settings.language);
+  const theme = settings.theme ?? 'dark';
   document.documentElement.setAttribute('data-theme', theme);
   // 同步原生标题栏明暗与窗口背景色，避免浅色主题下顶部仍深色
   try { await api.setWindowTheme(theme); } catch { /* 旧版后端无此命令时忽略 */ }
@@ -409,6 +550,7 @@ onUnmounted(() => {
   window.removeEventListener('resize', onWindowResize);
   if (resizeTimer) clearTimeout(resizeTimer);
   if (runningTimer) clearInterval(runningTimer);
+  if (resizeCleanup) resizeCleanup();
 });
 </script>
 
@@ -420,7 +562,7 @@ onUnmounted(() => {
         <a
           class="brand-lockup"
           href="https://gitcode.com/binglengdexie/RunHelp"
-          title="打开 RunHelp 开源仓库"
+          :title="t('打开 RunHelp 开源仓库')"
           @click.prevent="openRepo"
         >
           <div class="brand-art">
@@ -454,13 +596,13 @@ onUnmounted(() => {
           <button
             class="btn settings-btn"
             :class="{ active: tab === 'settings' }"
-            title="全局设置"
+            :title="t('全局设置')"
             @click="tab = 'settings'"
           >
             <svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true">
               <path fill="currentColor" d="M10 6.2a3.8 3.8 0 1 0 0 7.6 3.8 3.8 0 0 0 0-7.6Zm0 5.6a1.8 1.8 0 1 1 0-3.6 1.8 1.8 0 0 1 0 3.6Z" />
               <path fill="currentColor" d="m17.2 11.4.9.7-.9 1.6-1.1-.4a6.9 6.9 0 0 1-1.3 1.3l.2 1.1-1.6.9-.7-.9a7 7 0 0 1-1.5.6l-.4 1.1h-1.8l-.4-1.1a7 7 0 0 1-1.5-.6l-.7.9-1.6-.9.2-1.1a6.9 6.9 0 0 1-1.3-1.3l-1.1.4-.9-1.6.9-.7a7.2 7.2 0 0 1 0-1.5l-.9-.7.9-1.6 1.1.4a6.9 6.9 0 0 1 1.3-1.3l-.2-1.1 1.6-.9.7.9a7 7 0 0 1 1.5-.6L8 4.7h1.8l.4 1.1a7 7 0 0 1 1.5.6l.7-.9 1.6.9-.2 1.1a6.9 6.9 0 0 1 1.3 1.3l1.1-.4.9 1.6-.9.7a7.2 7.2 0 0 1 0 1.4Z" opacity=".85" />
-            </svg> 全局设置
+            </svg> {{ t('全局设置') }}
           </button>
         </div>
       </header>
@@ -472,7 +614,7 @@ onUnmounted(() => {
             :project="selected"
             :running="running"
             @run="onRun"
-            @clear-logs="logs = []"
+            @clear-logs="clearLogsAndReset"
           />
           <ImageCompress
             v-else-if="tab === 'compress'"
@@ -485,40 +627,40 @@ onUnmounted(() => {
           <div v-else-if="tab === 'tasks'" class="task-page">
             <div class="page-head">
               <div>
-                <h2>全局任务</h2>
-                <p class="muted">查看并管理所有项目启动的运行任务，终止常驻服务后可释放端口</p>
+                <h2>{{ t('全局任务') }}</h2>
+                <p class="muted">{{ t('查看并管理所有项目启动的运行任务，终止常驻服务后可释放端口') }}</p>
               </div>
-              <button class="btn" title="刷新运行中任务" :disabled="refreshing" @click="refreshTasks">
+              <button class="btn" :title="t('刷新运行中任务')" :disabled="refreshing" @click="refreshTasks">
                 <svg class="refresh-icon" :class="{ spinning: refreshing }" viewBox="0 0 20 20" width="15" height="15" aria-hidden="true">
                   <path d="M16.5 10a6.5 6.5 0 1 1-1.9-4.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
                   <path d="M16.5 2.6v4h-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
-                </svg> 刷新
+                </svg> {{ t('刷新') }}
               </button>
             </div>
 
             <section class="card task-card">
               <div class="task-card-head">
-                <strong><span class="pulse"></span> 运行中任务 <span class="muted">{{ running.length }}</span></strong>
-                <span class="muted hint">每 3 秒自动刷新</span>
+                <strong><span class="pulse"></span> {{ t('运行中任务') }} <span class="muted">{{ running.length }}</span></strong>
+                <span class="muted hint">{{ t('每 3 秒自动刷新') }}</span>
               </div>
-              <div v-if="!running.length" class="task-empty muted">当前没有运行中的任务</div>
+              <div v-if="!running.length" class="task-empty muted">{{ t('当前没有运行中的任务') }}</div>
               <div v-for="r in running" :key="r.run_id" class="task-row">
                 <span class="mono muted task-rid">[{{ r.run_id }}]</span>
                 <span class="task-target" :title="r.target">{{ r.target }}</span>
                 <span class="muted task-at">{{ r.started_at }}</span>
                 <span class="muted task-pid">PID {{ r.pid }}</span>
-                <span v-if="r.paused" class="tag paused">已暂停</span>
-                <button class="btn sm" @click="togglePauseRun(r)">{{ r.paused ? '继续' : '暂停' }}</button>
-                <button class="btn sm danger" @click="stopRunning(r.run_id)">终止</button>
+                <span v-if="r.paused" class="tag paused">{{ t('已暂停') }}</span>
+                <button class="btn sm" @click="togglePauseRun(r)">{{ r.paused ? t('继续') : t('暂停') }}</button>
+                <button class="btn sm danger" @click="stopRunning(r.run_id)">{{ t('终止') }}</button>
               </div>
             </section>
 
             <section class="card task-card">
               <div class="task-card-head">
-                <strong>运行记录 <span class="muted">{{ history.length }}</span></strong>
-                <button class="btn ghost sm" @click="clearHistory">清空记录</button>
+                <strong>{{ t('运行记录') }} <span class="muted">{{ history.length }}</span></strong>
+                <button class="btn ghost sm" @click="clearHistory">{{ t('清空记录') }}</button>
               </div>
-              <div v-if="!history.length" class="task-empty muted">暂无运行记录</div>
+              <div v-if="!history.length" class="task-empty muted">{{ t('暂无运行记录') }}</div>
               <div v-for="h in history" :key="h.id" class="history-row">
                 <span class="status-dot" :class="h.status"></span>
                 <span class="mono muted">#{{ h.id }}</span>
@@ -532,34 +674,50 @@ onUnmounted(() => {
 
         <!-- 运行日志默认折叠，所有页签常驻显示；点标题栏空白处即可展开/收起 -->
         <section
+          ref="consolePanel"
           class="console"
           :class="{ collapsed: consoleCollapsed }"
+          :style="consoleStyle"
         >
+          <!-- 顶边拖拽手柄：仅展开态可拖动调整高度 -->
+          <div
+            v-if="!consoleCollapsed"
+            class="console-resize-handle"
+            :title="t('拖动调整日志高度')"
+            @mousedown="startResize"
+          ></div>
           <div
             class="console-head"
-            :title="consoleCollapsed ? '展开运行日志' : '收起运行日志'"
-            @click="consoleCollapsed = !consoleCollapsed"
+            :title="consoleCollapsed ? t('展开运行日志') : t('收起运行日志')"
+            @click="consoleCollapsed = !consoleCollapsed; saveUiState(); realignFollow()"
           >
             <div class="console-toggle">
               <span class="chevron">{{ consoleCollapsed ? '▴' : '▾' }}</span>
-              <span class="console-title">{{ consoleTitle }}</span>
+              <span class="console-title">{{ t('运行日志') }}</span>
               <span v-if="consoleCollapsed && errorCount" class="err-count">{{ errorCount }}</span>
+              <!-- 档位切换归左侧视图控制区，与清空物理隔离 -->
+              <button
+                class="btn ghost sm size-btn"
+                :title="t('日志高度：{size}（点击切换）', { size: sizeLabel })"
+                @click.stop="cycleConsoleSize"
+              >{{ sizeLabel }}</button>
             </div>
             <div class="console-actions" @click.stop>
-              <span class="muted">{{ visibleLogs.length }} 行</span>
+              <span class="muted">{{ t('{count} 行', { count: visibleLogs.length }) }}</span>
               <button
                 class="btn sm"
                 :class="{ 'filter-active': onlyErrors }"
-                title="仅显示错误日志"
-                @click="onlyErrors = !onlyErrors"
-              >错误 <span class="err-count">{{ errorCount }}</span></button>
-              <button class="btn ghost sm" title="复制当前日志" @click="copyLogs">复制</button>
-              <button class="btn ghost sm" @click="logs = []">清空</button>
+                :title="t('仅显示错误日志')"
+                @click="onlyErrors = !onlyErrors; realignFollow()"
+              >{{ t('错误') }} <span class="err-count">{{ errorCount }}</span></button>
+              <button class="btn ghost sm" :title="t('复制当前日志')" @click="copyLogs">{{ t('复制') }}</button>
+              <span class="console-action-sep"></span>
+              <button class="btn danger sm" :title="t('清空所有日志（不可恢复）')" @click="clearLogsAndReset">{{ t('清空') }}</button>
             </div>
           </div>
-          <div v-if="!consoleCollapsed" class="console-body mono">
+          <div v-if="!consoleCollapsed" ref="consoleBody" class="console-body mono" @scroll.passive="onConsoleScroll">
             <div v-if="!visibleLogs.length" class="console-placeholder muted">
-              {{ onlyErrors && errorCount === 0 ? '当前没有错误日志' : '命令输出会实时显示在这里...' }}
+              {{ onlyErrors && errorCount === 0 ? t('当前没有错误日志') : t('命令输出会实时显示在这里...') }}
             </div>
             <div
               v-for="(l, i) in visibleLogs"
@@ -568,6 +726,12 @@ onUnmounted(() => {
               :class="{ 'is-error': isErrorLog(l) }"
             >{{ l.line }}</div>
           </div>
+          <!-- 暂停跟随时浮出的"跳到最新"，点击恢复自动滚动 -->
+          <button
+            v-if="!consoleCollapsed && !isFollowing && unreadLines"
+            class="jump-latest"
+            @click="jumpToLatest"
+          >↓ {{ t('跳到最新') }} · {{ t('{count} 行新日志', { count: unreadLines }) }}</button>
         </section>
       </div>
     </main>
@@ -580,7 +744,7 @@ onUnmounted(() => {
         <h3 :class="{ danger: confirmState.danger }">{{ confirmState.title }}</h3>
         <p class="confirm-message">{{ confirmState.message }}</p>
         <div class="modal-actions">
-          <button class="btn" @click="answerConfirm(false)">取消</button>
+          <button class="btn" @click="answerConfirm(false)">{{ t('取消') }}</button>
           <button
             class="btn"
             :class="confirmState.danger ? 'danger' : 'primary'"
@@ -654,22 +818,37 @@ onUnmounted(() => {
 .content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .workspace { flex: 1; min-height: 0; overflow: auto; padding: 20px 22px; }
 .console {
+  position: relative;
   height: 210px; flex-shrink: 0; border-top: 1px solid var(--border);
   background: var(--bg-1); display: flex; flex-direction: column;
 }
 /* 收缩态高度 53px：与左侧回收站上方分割线（sidebar-foot 顶边）齐平 */
-.console.collapsed { height: 53px; }
+.console.collapsed { height: 53px !important; }
+/* 顶边拖拽手柄：加宽可点击区域，视觉上仍是一条细线 */
+.console-resize-handle {
+  position: absolute; top: -3px; left: 0; right: 0; height: 8px;
+  cursor: ns-resize; z-index: 3;
+}
+.console-resize-handle::after {
+  content: ''; position: absolute; top: 3px; left: 0; right: 0; height: 2px;
+  background: transparent; transition: background .15s;
+}
+.console-resize-handle:hover::after { background: var(--accent); }
+/* 左侧档位按钮：与折叠箭头同属视图控制区 */
+.size-btn { margin-left: 4px; font-size: 11px; }
+/* 危险操作（清空）前的分隔线，与右侧常规操作隔开 */
+.console-action-sep { width: 1px; height: 15px; background: var(--border); }
 .console-head {
   height: 36px; flex-shrink: 0; display: flex; align-items: center;
   justify-content: space-between; padding: 0 16px;
   border-bottom: 1px solid var(--border-soft); cursor: pointer;
+  user-select: none;
 }
 .console.collapsed .console-head { height: 100%; border-bottom: none; }
 .console-toggle {
   display: inline-flex; align-items: center; gap: 8px;
   color: inherit;
 }
-.console-toggle:hover .console-title { color: var(--accent); }
 .chevron { font-size: 10px; color: var(--text-2); }
 .console-title { font-size: 12px; font-weight: 600; color: var(--text-0); }
 .console-actions { display: flex; align-items: center; gap: 10px; font-size: 11px; }
@@ -679,8 +858,17 @@ onUnmounted(() => {
   min-width: 18px; height: 16px; padding: 0 4px; border-radius: 8px;
   background: rgba(224,92,92,.16); color: var(--danger); font-size: 10px; font-weight: 700;
 }
-.console-body { flex: 1; overflow: auto; padding: 8px 16px; font-size: 12px; line-height: 1.65; }
+.console-body { flex: 1; min-height: 0; overflow: auto; padding: 8px 16px; font-size: 12px; line-height: 1.65; }
 .console-placeholder { height: 100%; display: flex; align-items: center; justify-content: center; }
+/* 暂停跟随时浮在日志右下角的"跳到最新" */
+.jump-latest {
+  position: absolute; right: 20px; bottom: 12px; z-index: 4;
+  height: 27px; padding: 0 12px; border-radius: 14px;
+  background: var(--accent); color: #fff; border: none;
+  font-size: 11px; cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .25);
+}
+.jump-latest:hover { background: var(--accent-hover); }
 .log-line { white-space: pre-wrap; word-break: break-all; color: var(--text-1); }
 .log-line.stdout { color: var(--text-0); }
 .log-line.stderr { color: var(--text-1); }
