@@ -1,55 +1,29 @@
 <script setup lang="ts">
-import { ref, computed, inject } from 'vue';
+import { ref, inject } from 'vue';
 import { api } from '../lib/api';
 import type { Pipeline, PipelineStep, Command } from '../types';
 
-const props = defineProps<{ projectId: number; commands: Command[] }>();
+const props = defineProps<{
+  projectId: number;
+  commands: Command[];
+  pipeline: Pipeline | null; // null = 新建，传入具体编排 = 编辑
+}>();
 const emit = defineEmits<{
   (e: 'close'): void;
   (e: 'run', id: string): void;
-  (e: 'changed'): void;
+  (e: 'saved'): void;
 }>();
 const notify = inject<(m: string) => void>('notify', () => {});
 const confirm = inject<(m: string, o?: { title?: string; danger?: boolean; confirmText?: string }) => Promise<boolean>>('confirm', async () => false);
 
-const pipelines = ref<Pipeline[]>([]);
-const active = ref<Pipeline | null>(null);
+const activeId = ref<number | null>(props.pipeline?.id ?? null);
+const form = ref({ name: props.pipeline?.name ?? '', description: props.pipeline?.description ?? '' });
 const steps = ref<PipelineStep[]>([]);
-const newName = ref('');
 const loading = ref(false);
 
-async function loadPipelines() {
-  pipelines.value = await api.listPipelines(props.projectId);
-  if (!active.value && pipelines.value.length) await select(pipelines.value[0]);
-  else if (active.value) {
-    const found = pipelines.value.find((p) => p.id === active.value!.id);
-    if (found) await select(found);
-  }
-}
-
-async function select(p: Pipeline) {
-  active.value = p;
-  steps.value = await api.listPipelineSteps(p.id);
-}
-
-async function createPipeline() {
-  if (!newName.value.trim()) return;
-  const id = await api.savePipeline(null, props.projectId, newName.value.trim(), '');
-  newName.value = '';
-  await loadPipelines();
-  const found = pipelines.value.find((p) => p.id === id);
-  if (found) await select(found);
-  emit('changed');
-  notify('流水线已创建');
-}
-
-async function deletePipeline() {
-  if (!active.value || !(await confirm(`删除流水线「${active.value.name}」？`, { title: '删除流水线', danger: true, confirmText: '删除' }))) return;
-  await api.deletePipeline(active.value.id);
-  active.value = null;
-  steps.value = [];
-  await loadPipelines();
-  emit('changed');
+// 编辑模式加载已有步骤；新建模式从空列表开始
+if (activeId.value != null) {
+  api.listPipelineSteps(activeId.value).then((list) => (steps.value = list));
 }
 
 function addCommandStep() {
@@ -92,12 +66,22 @@ function move(i: number, dir: -1 | 1) {
   steps.value[j] = tmp;
 }
 
-async function saveSteps() {
-  if (!active.value) return;
+async function save(): Promise<number | null> {
+  if (!form.value.name.trim()) {
+    notify('请填写流水线名称');
+    return null;
+  }
   loading.value = true;
   try {
+    // 名称与描述随步骤一起落库：新建拿 id，编辑走 UPDATE（后端 save_pipeline 已支持改名）
+    const id = await api.savePipeline(
+      activeId.value,
+      props.projectId,
+      form.value.name.trim(),
+      form.value.description.trim()
+    );
     await api.savePipelineSteps(
-      active.value.id,
+      id,
       steps.value.map((s) => ({
         command_id: s.command_id,
         step_type: s.step_type,
@@ -105,45 +89,53 @@ async function saveSteps() {
         on_error: s.on_error,
       }))
     );
+    activeId.value = id; // 新建保存后转为编辑态
+    emit('saved');
     notify('流水线已保存');
-    emit('changed');
+    return id;
   } catch (e) {
     notify(`保存失败: ${e}`);
+    return null;
   } finally {
     loading.value = false;
   }
 }
 
-async function run() {
-  if (!active.value) return;
-  await saveSteps();
-  const id = await api.runPipeline(active.value.id);
-  emit('run', id);
-  notify('流水线已启动');
+async function remove() {
+  if (activeId.value == null) return;
+  if (!(await confirm(`删除流水线「${form.value.name}」？`, { title: '删除流水线', danger: true, confirmText: '删除' }))) return;
+  await api.deletePipeline(activeId.value);
+  emit('saved');
+  emit('close');
+  notify('流水线已删除');
 }
 
-defineExpose({ loadPipelines });
+async function run() {
+  const id = await save();
+  if (id == null) return;
+  const runId = await api.runPipeline(id);
+  emit('run', runId);
+  notify('流水线已启动');
+}
 </script>
 
 <template>
   <div class="modal-mask" @click.self="emit('close')">
-    <div class="modal editor">
-      <h3>流水线编排</h3>
-      <div class="pipe-list">
-        <button
-          v-for="p in pipelines"
-          :key="p.id"
-          class="pipe-tab"
-          :class="{ active: active?.id === p.id }"
-          @click="select(p)"
-        >{{ p.name }}</button>
-        <div class="new-pipe">
-          <input v-model="newName" class="input sm" placeholder="新流水线名称" @keyup.enter="createPipeline" />
-          <button class="btn sm" @click="createPipeline">+</button>
+    <div class="modal editor" role="dialog" aria-modal="true">
+      <h3>{{ activeId == null ? '新建流水线' : '编辑流水线' }}</h3>
+
+      <div class="pipe-form">
+        <div class="field">
+          <label>流水线名称</label>
+          <input v-model="form.name" class="input" placeholder="例如：重启服务" />
+        </div>
+        <div class="field">
+          <label>描述（可选）</label>
+          <input v-model="form.description" class="input" placeholder="简单说明这条流水线的用途" />
         </div>
       </div>
 
-      <div v-if="active" class="steps-area">
+      <div class="steps-area">
         <div class="steps-toolbar">
           <span class="muted">步骤（按顺序执行）</span>
           <div class="row" style="gap: 6px">
@@ -161,7 +153,7 @@ defineExpose({ loadPipelines });
             </template>
             <template v-else>
               <select v-model.number="s.command_id" class="select sm" style="flex: 1">
-                <option v-for="c in commands" :key="c.id" :value="c.id">{{ c.name }} — {{ c.cmd }}</option>
+                <option v-for="c in commands" :key="c.id" :value="c.id" :title="c.cmd">{{ c.name }}</option>
               </select>
               <select v-model="s.on_error" class="select sm" style="width: 96px">
                 <option value="stop">失败即停</option>
@@ -176,34 +168,38 @@ defineExpose({ loadPipelines });
           </div>
           <div v-if="!steps.length" class="empty-small muted">还没有步骤，点击上方按钮添加</div>
         </div>
-        <div class="modal-actions">
-          <button class="btn danger" @click="deletePipeline">删除流水线</button>
-          <button class="btn" @click="emit('close')">关闭</button>
-          <button class="btn" :disabled="loading" @click="saveSteps">保存</button>
-          <button class="btn primary" :disabled="loading || !steps.length" @click="run">运行</button>
-        </div>
       </div>
-      <div v-else class="empty-small muted" style="padding: 30px">创建一个流水线，把多个命令串成一键操作</div>
+
+      <div class="modal-actions">
+        <button v-if="activeId != null" class="btn danger" @click="remove">删除流水线</button>
+        <button class="btn" @click="emit('close')">关闭</button>
+        <button class="btn" :disabled="loading" @click="save">保存</button>
+        <button class="btn primary" :disabled="loading || !steps.length" @click="run">运行</button>
+      </div>
     </div>
   </div>
 </template>
 
 <style scoped>
-.editor { width: 720px; }
-.pipe-list { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; border-bottom: 1px solid var(--border); padding-bottom: 12px; }
-.pipe-tab { height: 28px; padding: 0 12px; border: 1px solid var(--border); background: var(--bg-2); border-radius: 6px; cursor: pointer; font-size: 12px; }
-.pipe-tab.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
-.new-pipe { display: flex; gap: 5px; margin-left: auto; }
-.new-pipe .input { width: 160px; }
-.input.sm, .select.sm { height: 26px; padding: 0 8px; font-size: 12px; }
-.steps-area { margin-top: 16px; }
-.steps-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; font-size: 12px; }
-.steps-list { display: flex; flex-direction: column; gap: 7px; max-height: 340px; overflow: auto; }
-.step-row { display: flex; align-items: center; gap: 9px; padding: 8px 10px; background: var(--bg-2); border: 1px solid var(--border-soft); border-radius: 7px; }
+.editor {
+  width: 720px;
+  max-height: 80vh;
+  overflow: hidden; /* 外框不滚动，只让步骤列表滚 */
+  display: flex;
+  flex-direction: column;
+}
+.editor h3 { flex-shrink: 0; margin-bottom: 14px; }
+.pipe-form { flex-shrink: 0; display: flex; gap: 12px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+.pipe-form .field { flex: 1; }
+.steps-area { flex: 1; min-height: 120px; display: flex; flex-direction: column; margin-top: 14px; }
+.steps-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; font-size: 12px; flex-shrink: 0; }
+.steps-list { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 7px; padding-right: 2px; }
+.step-row { display: flex; align-items: center; gap: 9px; padding: 8px 10px; background: var(--bg-2); border: 1px solid var(--border-soft); border-radius: 7px; flex-shrink: 0; }
 .step-no { width: 20px; height: 20px; flex-shrink: 0; border-radius: 5px; background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center; font-size: 11px; }
 .step-actions { display: flex; gap: 2px; }
 .icon-sm { width: 22px; height: 22px; border: none; background: transparent; color: var(--text-2); cursor: pointer; border-radius: 4px; font-size: 13px; }
 .icon-sm:hover { background: var(--bg-3); color: var(--text-0); }
 .icon-sm.danger:hover { color: var(--danger); }
-.empty-small { text-align: center; font-size: 12px; }
+.empty-small { text-align: center; font-size: 12px; padding: 18px 0; }
+.modal-actions { flex-shrink: 0; }
 </style>

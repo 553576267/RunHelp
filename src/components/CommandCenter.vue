@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref, watch, inject, computed, onUnmounted } from 'vue';
+import { ref, watch, inject, computed, onMounted, onUnmounted } from 'vue';
 import { api } from '../lib/api';
-import type { Project, Command, RunningInfo } from '../types';
+import type { Project, Command, RunningInfo, Pipeline } from '../types';
 import PipelineEditor from './PipelineEditor.vue';
 
 const props = defineProps<{ project: Project | null; running: RunningInfo[] }>();
@@ -9,11 +9,16 @@ const emit = defineEmits<{ (e: 'run', id: string): void; (e: 'clear-logs'): void
 const notify = inject<(m: string) => void>('notify', () => {});
 const confirm = inject<(m: string, o?: { title?: string; danger?: boolean; confirmText?: string }) => Promise<boolean>>('confirm', async () => false);
 
+type ShellType = 'powershell' | 'cmd' | 'bash';
+
 const commands = ref<Command[]>([]);
-// 正在启动中的命令 id（方案 A 防抖）：仅覆盖 runCommand 异步返回的窗口期，不阻止多实例
-const startingIds = ref<Set<number>>(new Set());
-// 防抖定时器：点击后固定冷却 1 秒再释放，给按钮稳定的禁用反馈（无需等待 runCommand 返回）
-const debounceTimers = new Map<number, number>();
+const pipelines = ref<Pipeline[]>([]);
+// 全局默认 shell：命令页每次挂载时读取，让设置页的「默认 Shell」真正生效
+const defaultShell = ref<ShellType>('powershell');
+// 正在启动中的项（方案 A 防抖）：key 用 "c:id"/"p:id" 区分命令与流水线，避免 id 撞号
+const startingIds = ref<Set<string>>(new Set());
+// 防抖定时器：点击后固定冷却 600ms 再释放，给按钮稳定的启动反馈（无需等待 IPC 返回）
+const debounceTimers = new Map<string, number>();
 // 每个命令正在运行的实例数（来自全局 running 列表，按 command_id 精确匹配，用于左下角角标）
 const runningCount = computed(() => {
   const m = new Map<number, number>();
@@ -22,22 +27,55 @@ const runningCount = computed(() => {
   }
   return m;
 });
+// 每条流水线正在运行的实例数（按 pipeline_id 精确匹配，用于流水线卡片左下角角标）
+const pipelineRunningCount = computed(() => {
+  const m = new Map<number, number>();
+  for (const r of props.running) {
+    if (r.pipeline_id != null) m.set(r.pipeline_id, (m.get(r.pipeline_id) ?? 0) + 1);
+  }
+  return m;
+});
+
+// 统一防抖：返回 false 表示冷却期内、忽略本次点击；否则标记启动并 600ms 后释放
+function markStarting(key: string): boolean {
+  if (startingIds.value.has(key)) return false;
+  startingIds.value.add(key);
+  const timer = window.setTimeout(() => {
+    startingIds.value.delete(key);
+    debounceTimers.delete(key);
+  }, 600);
+  debounceTimers.set(key, timer);
+  return true;
+}
 const showCommandModal = ref(false);
 const showPipeline = ref(false);
 const showAdhoc = ref(false);
 const editing = ref<Command | null>(null);
-const pipelineRef = ref<InstanceType<typeof PipelineEditor> | null>(null);
+// 当前正在编辑器中修改的流水线；null 表示新建模式
+const editingPipeline = ref<Pipeline | null>(null);
 
 // 临时命令：不保存，直接运行（适合快速测试 python server.py 之类）
-const adhoc = ref({ cmd: '', shell: 'powershell' as 'powershell' | 'cmd' | 'bash', cwd: '' });
+const adhoc = ref({ cmd: '', shell: 'powershell' as ShellType, cwd: '' });
 
 const form = ref({
   name: '',
   cmd: '',
   cwd: '',
-  shell: 'powershell',
+  shell: 'powershell' as ShellType,
   type: 'custom',
   timeout_ms: 0,
+});
+
+onMounted(async () => {
+  try {
+    const s = (await api.getSettings()).default_shell;
+    if (s === 'cmd' || s === 'bash' || s === 'powershell') {
+      defaultShell.value = s;
+      // 同步到两个表单的当前值（仅在用户还没输入时，避免覆盖正在编辑的内容）
+      form.value.shell = s;
+      adhoc.value.shell = s;
+    }
+  } catch { /* 读取失败则保持默认 powershell */ }
 });
 
 watch(
@@ -49,18 +87,27 @@ watch(
 async function load() {
   if (!props.project) {
     commands.value = [];
+    pipelines.value = [];
     return;
   }
   commands.value = await api.listCommands(props.project.id);
+  pipelines.value = await api.listPipelines(props.project.id);
 }
 
 function openCreate() {
   editing.value = null;
-  form.value = { name: '', cmd: '', cwd: '', shell: 'powershell', type: 'custom', timeout_ms: 0 };
+  form.value = { name: '', cmd: '', cwd: '', shell: defaultShell.value, type: 'custom', timeout_ms: 0 };
   showCommandModal.value = true;
 }
 
+// 双击卡片打开编辑时，浏览器默认会选中双击处的文字；弹窗挂载后选区会扩展到整个弹窗，
+// 导致所有文字呈蓝色选中态。打开编辑前主动清除选区。
+function clearTextSelection() {
+  window.getSelection()?.removeAllRanges();
+}
+
 function openEdit(c: Command) {
+  clearTextSelection();
   editing.value = c;
   form.value = {
     name: c.name,
@@ -101,14 +148,8 @@ async function removeCommand(c: Command) {
 }
 
 async function run(c: Command) {
-  // 防抖：点击后固定冷却 1 秒，期间重复点击直接忽略，按钮有明确的禁用反馈
-  if (startingIds.value.has(c.id)) return;
-  startingIds.value.add(c.id);
-  const timer = window.setTimeout(() => {
-    startingIds.value.delete(c.id);
-    debounceTimers.delete(c.id);
-  }, 600);
-  debounceTimers.set(c.id, timer);
+  // 防抖：点击后固定冷却 600ms，期间重复点击直接忽略，按钮有明确的启动反馈
+  if (!markStarting(`c:${c.id}`)) return;
   // 先清空日志再启动，避免后端线程早期输出被随后到达的 clear 清掉
   emit('clear-logs');
   try {
@@ -157,9 +198,36 @@ function onPipelineRun(id: string) {
   notify('流水线已启动，可在「全局任务」页终止');
 }
 
-async function openPipeline() {
+// 新建：以空编辑器打开
+function openNewPipeline() {
+  editingPipeline.value = null;
   showPipeline.value = true;
-  setTimeout(() => pipelineRef.value?.loadPipelines(), 0);
+}
+
+// 编辑：加载指定流水线到编辑器
+function openEditPipeline(p: Pipeline) {
+  clearTextSelection();
+  editingPipeline.value = p;
+  showPipeline.value = true;
+}
+
+// 卡片上直接运行（用已保存的步骤）
+async function runPipeline(p: Pipeline) {
+  // 与命令卡片一致的防抖：冷却期内忽略重复点击
+  if (!markStarting(`p:${p.id}`)) return;
+  try {
+    const id = await api.runPipeline(p.id);
+    onPipelineRun(id);
+  } catch (e) {
+    notify(`启动失败: ${e}`);
+  }
+}
+
+async function removePipeline(p: Pipeline) {
+  if (!(await confirm(`删除流水线「${p.name}」？`, { title: '删除流水线', danger: true, confirmText: '删除' }))) return;
+  await api.deletePipeline(p.id);
+  await load();
+  notify('流水线已删除');
 }
 
 </script>
@@ -174,13 +242,13 @@ async function openPipeline() {
         </div>
         <div class="row" style="gap: 8px">
           <button class="btn" @click="showAdhoc = true">临时命令</button>
-          <button class="btn" @click="openPipeline">流水线编排</button>
-          <button class="btn primary" @click="openCreate">+ 新建命令</button>
+          <button class="btn" @click="openNewPipeline">新建流水线</button>
+          <button class="btn btn-create" @click="openCreate">新建命令</button>
         </div>
       </div>
 
       <div class="cmd-grid">
-        <div v-for="c in commands" :key="c.id" class="card cmd-card">
+        <div v-for="c in commands" :key="c.id" class="card cmd-card" title="双击编辑命令" @dblclick.prevent="openEdit(c)">
           <div class="cmd-title">
             <span class="tag" :class="c.type">{{ c.type === 'install' ? '安装' : c.type === 'build' ? '构建' : c.type === 'run' ? '运行' : '自定义' }}</span>
             <strong :title="c.name">{{ c.name }}</strong>
@@ -205,20 +273,58 @@ async function openPipeline() {
                 <path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
               </svg>
             </button>
-            <button class="act act-del" title="删除" @click="removeCommand(c)">
+            <button class="act act-del" title="删除" @click="removeCommand(c)" @dblclick.stop>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M3 6h18" /><path d="M8 6V4h8v2" /><path d="M19 6l-1 14H6L5 6" /><path d="M10 11v6M14 11v6" />
               </svg>
             </button>
-            <button class="act act-run" :disabled="startingIds.has(c.id)" :title="startingIds.has(c.id) ? '启动中…' : '运行'" @click="run(c)">
-              <svg v-if="startingIds.has(c.id)" class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+            <button class="act act-run" :disabled="startingIds.has(`c:${c.id}`)" :title="startingIds.has(`c:${c.id}`) ? '启动中…' : '运行'" @click="run(c)" @dblclick.stop>
+              <svg v-if="startingIds.has(`c:${c.id}`)" class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
                 <path d="M12 3a9 9 0 1 0 9 9" />
               </svg>
               <svg v-else viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
             </button>
           </div>
         </div>
-        <button class="card add-card" @click="openCreate">+ 添加命令</button>
+      </div>
+
+      <div v-if="pipelines.length" class="pipe-section">
+        <h3 class="section-title">流水线 <span class="muted">{{ pipelines.length }}</span></h3>
+        <div class="cmd-grid">
+          <div v-for="p in pipelines" :key="p.id" class="card cmd-card pipe-card" title="双击编辑流水线" @dblclick.prevent="openEditPipeline(p)">
+            <div class="cmd-title">
+              <span class="tag pipe-tag">流水线</span>
+              <strong :title="p.name">{{ p.name }}</strong>
+            </div>
+            <div class="pipe-desc" :title="p.description || '暂无描述'">{{ p.description || '暂无描述' }}</div>
+            <div class="cmd-actions">
+              <span
+                v-if="(pipelineRunningCount.get(p.id) ?? 0) > 0"
+                class="run-badge"
+                :title="`${pipelineRunningCount.get(p.id)} 个实例运行中，可在「全局任务」终止`"
+              >
+                <span class="run-dot"></span>
+                <span class="run-num">{{ pipelineRunningCount.get(p.id) }}</span>
+              </span>
+              <button class="act act-edit" title="编辑" @click="openEditPipeline(p)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                </svg>
+              </button>
+              <button class="act act-del" title="删除" @click="removePipeline(p)" @dblclick.stop>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M3 6h18" /><path d="M8 6V4h8v2" /><path d="M19 6l-1 14H6L5 6" /><path d="M10 11v6M14 11v6" />
+                </svg>
+              </button>
+              <button class="act act-run" :disabled="startingIds.has(`p:${p.id}`)" :title="startingIds.has(`p:${p.id}`) ? '启动中…' : '运行'" @click="runPipeline(p)" @dblclick.stop>
+                <svg v-if="startingIds.has(`p:${p.id}`)" class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+                  <path d="M12 3a9 9 0 1 0 9 9" />
+                </svg>
+                <svg v-else viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     </template>
 
@@ -316,12 +422,13 @@ async function openPipeline() {
 
     <PipelineEditor
       v-if="showPipeline && project"
-      ref="pipelineRef"
+      :key="editingPipeline?.id ?? 'new'"
       :project-id="project.id"
       :commands="commands"
+      :pipeline="editingPipeline"
       @close="showPipeline = false"
       @run="onPipelineRun"
-      @changed="load"
+      @saved="load"
     />
   </div>
 </template>
@@ -332,7 +439,8 @@ async function openPipeline() {
 .page-head h2 { font-size: 18px; font-weight: 600; }
 .page-head p { font-size: 12px; margin-top: 4px; }
 .cmd-grid { display: grid; grid-template-columns: repeat(auto-fill, 200px); gap: 12px; }
-.cmd-card { width: 200px; padding: 12px; display: flex; flex-direction: column; gap: 9px; }
+.cmd-card { width: 200px; padding: 12px; display: flex; flex-direction: column; gap: 9px; user-select: none; }
+.cmd-card input, .cmd-card textarea { user-select: text; }
 .cmd-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .cmd-title strong { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cmd-line { font-size: 11px; color: var(--text-1); background: var(--bg-0); padding: 7px 8px; border-radius: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -365,6 +473,18 @@ async function openPipeline() {
 .run-dot { width: 6px; height: 6px; border-radius: 50%; background: #22c55e; animation: dot-pulse 1.2s ease-in-out infinite; }
 .run-num { font-size: 11px; font-weight: 600; line-height: 1; }
 @keyframes dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
-.add-card { width: 200px; min-height: 120px; border-style: dashed; background: transparent; color: var(--text-2); cursor: pointer; font-size: 14px; }
-.add-card:hover { color: var(--accent); border-color: var(--accent); }
+/* 新建命令按钮：默认中性灰融入顶栏，hover 才亮蓝边强调（方案 C） */
+.btn-create { transition: background .15s, border-color .15s, box-shadow .15s, transform .15s; }
+.btn-create:hover {
+  border-color: var(--accent);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .28);
+  transform: translateY(-1px);
+}
+.btn-create:active { transform: translateY(0); box-shadow: none; }
+/* 流水线分区 */
+.pipe-section { margin-top: 24px; }
+.section-title { font-size: 13px; font-weight: 600; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+.section-title .muted { font-size: 11px; font-weight: 400; }
+.pipe-tag { background: rgba(168, 85, 247, .14); color: #c084fc; border-color: rgba(168, 85, 247, .35); }
+.pipe-desc { font-size: 11px; color: var(--text-2); background: var(--bg-0); padding: 7px 8px; border-radius: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 </style>

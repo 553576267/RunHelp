@@ -138,6 +138,7 @@ pub fn run_command(command_id: i64, app: AppHandle, state: State<'_, AppState>) 
             target: name.clone(),
             started_at: state.local_now(),
             command_id: Some(command_id),
+            pipeline_id: None,
         },
     );
     thread::spawn(move || {
@@ -172,6 +173,7 @@ pub fn run_adhoc(
             target: format!("临时: {}", cmd),
             started_at: state.local_now(),
             command_id: None,
+            pipeline_id: None,
         },
     );
     let rid = run_id.clone();
@@ -269,6 +271,7 @@ pub fn list_running(state: State<'_, AppState>) -> Result<Vec<crate::models::Run
             pid,
             paused,
             command_id: m.command_id,
+            pipeline_id: m.pipeline_id,
         });
     }
     Ok(out)

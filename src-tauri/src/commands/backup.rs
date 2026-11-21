@@ -83,6 +83,7 @@ pub fn run_backup(app: AppHandle, state: State<'_, AppState>) -> Result<String, 
             target: "数据库备份".into(),
             started_at: state.local_now(),
             command_id: None,
+            pipeline_id: None,
         },
     );
 

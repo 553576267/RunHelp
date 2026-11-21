@@ -172,6 +172,7 @@ pub fn run_pipeline(pipeline_id: i64, app: AppHandle, state: State<'_, AppState>
             target: format!("流水线: {}", pipeline_name),
             started_at: state.local_now(),
             command_id: None,
+            pipeline_id: Some(pipeline_id),
         },
     );
 
@@ -182,7 +183,7 @@ pub fn run_pipeline(pipeline_id: i64, app: AppHandle, state: State<'_, AppState>
         let history_id = if let Ok(ref c) = hist_conn {
             let _ = c.execute(
                 "INSERT INTO run_history(project_id, target, target_id) VALUES (?1,?2,?3)",
-                rusqlite::params![project_id, "pipeline", pipeline_id],
+                rusqlite::params![project_id, format!("pipeline:{}", pipeline_name), pipeline_id],
             );
             c.last_insert_rowid()
         } else {

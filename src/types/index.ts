@@ -90,6 +90,7 @@ export interface RunningInfo {
   pid: number;
   paused: boolean;
   command_id: number | null;
+  pipeline_id: number | null;
 }
 
 export interface BackupInfo {

@@ -116,6 +116,8 @@ pub struct RunningMeta {
     pub started_at: String,
     /// 普通命令运行时带上命令 id，供命令卡片角标精确匹配；其它任务类型为 None
     pub command_id: Option<i64>,
+    /// 流水线运行时带上流水线 id，供流水线卡片角标精确匹配；其它任务类型为 None
+    pub pipeline_id: Option<i64>,
 }
 
 /// 暴露给前端的"运行中任务"信息。
@@ -129,4 +131,6 @@ pub struct RunningInfo {
     pub paused: bool,
     /// 对应的命令 id（仅普通命令任务有值），用于命令卡片运行角标
     pub command_id: Option<i64>,
+    /// 对应的流水线 id（仅流水线任务有值），用于流水线卡片运行角标
+    pub pipeline_id: Option<i64>,
 }
