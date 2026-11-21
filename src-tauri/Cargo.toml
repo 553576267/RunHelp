@@ -1,6 +1,6 @@
 [package]
 name = "runhelp"
-version = "0.1.2"
+version = "0.1.3"
 description = "RunHelp 开发助手"
 authors = ["RunHelp"]
 edition = "2021"
@@ -17,6 +17,7 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.31", features = ["bundled", "backup"] }

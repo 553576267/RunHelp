@@ -2,7 +2,9 @@
 import { ref, onMounted, onUnmounted, provide, computed, watch } from 'vue';
 import { listen } from '@tauri-apps/api/event';
 import { getVersion } from '@tauri-apps/api/app';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open as openUrl } from '@tauri-apps/plugin-shell';
+import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { api } from './lib/api';
 import type { Project, LogEvent, RunEndEvent, RunHistory } from './types';
 import ProjectSidebar from './components/ProjectSidebar.vue';
@@ -344,8 +346,32 @@ function handleRunEnd(e: RunEndEvent) {
     line: `━━━ 【RunHelp】${label[e.status] ?? e.status} · 退出码 ${e.exit_code} · ${secs}s ━━━`,
   });
   if (logs.value.length > 1200) logs.value.splice(0, 400);
+  void maybeNotifySuccess(e);
   // 运行结束刷新记录（运行记录已移到「全局任务」页）
   loadHistory();
+}
+
+async function maybeNotifySuccess(e: RunEndEvent) {
+  if (e.status !== 'success') return;
+  // 流水线步骤 run_id 形如 xxx-s0，跳过，避免一步一弹
+  if (/-s\d+$/.test(e.run_id)) return;
+  try {
+    const settings = await api.getSettings();
+    if (settings.notify_on_success === '0') return;
+    const win = getCurrentWindow();
+    // 窗口在前台时用户已经能看到日志，不打扰；最小化或被别的窗口盖住才弹
+    if (await win.isFocused()) return;
+    let granted = await isPermissionGranted();
+    if (!granted) granted = (await requestPermission()) === 'granted';
+    if (!granted) return;
+    const secs = (e.duration_ms / 1000).toFixed(1);
+    await sendNotification({
+      title: 'RunHelp · 执行完成',
+      body: `${e.title || '任务'} · 耗时 ${secs}s`,
+    });
+  } catch {
+    // 通知失败不影响主流程
+  }
 }
 
 function onRun(id: string) {

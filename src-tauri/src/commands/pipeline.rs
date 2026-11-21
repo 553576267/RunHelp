@@ -1,4 +1,5 @@
 use std::thread;
+use std::time::Instant;
 
 use tauri::{AppHandle, State};
 
@@ -179,6 +180,7 @@ pub fn run_pipeline(pipeline_id: i64, app: AppHandle, state: State<'_, AppState>
     let state_owned = state.inner().clone();
     let rid = run_id.clone();
     thread::spawn(move || {
+        let started = Instant::now();
         let hist_conn = state_owned.conn();
         let history_id = if let Ok(ref c) = hist_conn {
             let _ = c.execute(
@@ -247,12 +249,28 @@ pub fn run_pipeline(pipeline_id: i64, app: AppHandle, state: State<'_, AppState>
                 let _ = cmd_id;
             }
         }
+        let status = if state_owned.runtime.is_stopped(&rid) {
+            "stopped"
+        } else if aborted {
+            "failed"
+        } else {
+            "success"
+        };
         if let Ok(ref c) = hist_conn {
             let _ = c.execute(
                 "UPDATE run_history SET ended_at=datetime('now','localtime'), status=?1 WHERE id=?2",
-                rusqlite::params![if aborted { "failed" } else { "success" }, history_id],
+                rusqlite::params![status, history_id],
             );
         }
+        // 流水线整体发一条顶层结束事件；步骤的 run://end 用 {rid}-sN，不会误触发通知。
+        let _ = tauri::Emitter::emit(&app, "run://end", crate::models::RunEndEvent {
+            run_id: rid.clone(),
+            title: pipeline_name.clone(),
+            status: status.to_string(),
+            exit_code: if status == "success" { 0 } else { -1 },
+            stderr: String::new(),
+            duration_ms: started.elapsed().as_millis() as u64,
+        });
         state_owned.runtime.paused.lock().unwrap().remove(&rid);
         state_owned.runtime.running_meta.lock().unwrap().remove(&rid);
     });

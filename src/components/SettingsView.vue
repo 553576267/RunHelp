@@ -70,7 +70,7 @@ async function runBackup() {
 
 async function restoreBackup(b: BackupInfo) {
   const ok = await confirm(
-    `从备份恢复？\n\n备份文件：${b.name}\n时间：${b.modified}\n\n当前数据库会先自动另存一份保命，然后用该备份覆盖。恢复后需重启软件生效。`,
+    `从备份恢复？\n\n备份文件：${b.name}\n时间：${b.modified}\n\n当前数据库会先自动另存一份保命，然后用该备份覆盖。恢复后会自动升级到当前结构并立即生效。`,
     { title: '从备份恢复', danger: true, confirmText: '确认恢复' }
   );
   if (!ok) return;
@@ -190,6 +190,17 @@ async function pickPython() {
           </select>
           <button class="btn" @click="saveSetting('theme')">应用</button>
         </div>
+      </div>
+      <div class="field" style="margin-top: 16px">
+        <label>任务完成通知</label>
+        <div class="row">
+          <select v-model="settings.notify_on_success" class="select">
+            <option value="1">开启（仅成功，窗口失焦时）</option>
+            <option value="0">关闭</option>
+          </select>
+          <button class="btn" @click="saveSetting('notify_on_success')">保存</button>
+        </div>
+        <span class="muted hint">命令或流水线成功结束后，若窗口不在前台，会在桌面右下角提示；失败和手动停止不弹。</span>
       </div>
     </div>
 

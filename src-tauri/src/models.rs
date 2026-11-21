@@ -101,6 +101,8 @@ pub struct LogEvent {
 #[derive(Debug, Clone, Serialize)]
 pub struct RunEndEvent {
     pub run_id: String,
+    /// 命令名 / 流水线名 / 备份任务名，用于完成通知展示
+    pub title: String,
     pub status: String,
     pub exit_code: i32,
     // 进程结束时把捕获到的 stderr 一并带回，防止流式日志丢失时看不到错误

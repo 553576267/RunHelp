@@ -77,6 +77,7 @@ export interface LogEvent {
 
 export interface RunEndEvent {
   run_id: string;
+  title: string;
   status: string;
   exit_code: number;
   stderr: string;

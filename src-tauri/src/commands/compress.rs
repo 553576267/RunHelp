@@ -183,7 +183,7 @@ pub fn run_compression(
         });
         let mut proc_cmd = std::process::Command::new(&py);
         proc_cmd.arg(&script_str).arg("--config").arg(&config_str);
-        let result = execute(app_move.clone(), &state_owned, &rid, &mut proc_cmd, 0);
+        let result = execute(app_move.clone(), &state_owned, &rid, &mut proc_cmd, 0, "图片压缩");
         let status = match result {
             Ok((code, _)) => code,
             Err(e) => {

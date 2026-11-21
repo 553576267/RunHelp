@@ -3,7 +3,7 @@ use std::thread;
 
 use tauri::{AppHandle, Manager, State};
 
-use crate::models::{LogEvent, RunEndEvent};
+use crate::models::LogEvent;
 use crate::process::{execute, kill_tree};
 use crate::state::AppState;
 
@@ -119,7 +119,7 @@ pub fn run_backup(app: AppHandle, state: State<'_, AppState>) -> Result<String, 
             .arg("--db").arg(&db_str)
             .arg("--dir").arg(&backup_dir);
 
-        let result = execute(app_move.clone(), &state_owned, &rid, &mut proc_cmd, 0);
+        let result = execute(app_move.clone(), &state_owned, &rid, &mut proc_cmd, 0, "数据库备份");
         let status = match result {
             Ok((code, stderr)) => {
                 if code != 0 && !stderr.trim().is_empty() {
@@ -150,13 +150,6 @@ pub fn run_backup(app: AppHandle, state: State<'_, AppState>) -> Result<String, 
         state_owned.runtime.paused.lock().unwrap().remove(&rid);
         state_owned.runtime.children.lock().unwrap().remove(&rid);
         state_owned.runtime.running_meta.lock().unwrap().remove(&rid);
-        let _ = tauri::Emitter::emit(&app_move, "run://end", RunEndEvent {
-            run_id: rid.clone(),
-            status: status_text.into(),
-            exit_code: status,
-            stderr: String::new(),
-            duration_ms: 0,
-        });
     });
 
     Ok(run_id)

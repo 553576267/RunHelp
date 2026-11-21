@@ -218,6 +218,7 @@ pub fn execute(
     run_id: &str,
     proc_cmd: &mut ProcCommand,
     timeout_ms: i64,
+    title: &str,
 ) -> Result<(i32, String), String> {
     proc_cmd
         .stdout(Stdio::piped())
@@ -353,6 +354,7 @@ pub fn execute(
         "run://end",
         RunEndEvent {
             run_id: run_id.to_string(),
+            title: title.to_string(),
             status: status_text.to_string(),
             exit_code: code,
             stderr: stderr_text,
@@ -396,7 +398,7 @@ pub fn run_shell(
     emit_line(&app, run_id, "info", "【RunHelp】执行命令：".into());
     emit_line(&app, run_id, "stdout", format!("$ {}", cmd));
     emit_line(&app, run_id, "info", "【RunHelp】执行结果：".into());
-    execute(app, state, run_id, &mut proc_cmd, timeout_ms)
+    execute(app, state, run_id, &mut proc_cmd, timeout_ms, label)
 }
 
 pub fn kill_tree(pid: u32) {

@@ -198,7 +198,7 @@ pub fn list_backups(state: State<'_, AppState>) -> Result<Vec<BackupInfo>, Strin
 /// 2. 校验备份文件是可打开的 SQLite（integrity_check）
 /// 3. checkpoint 当前库，并把当前库另存为 .before-restore_<时间戳> 保命
 /// 4. 用 SQLite backup API 把备份写回当前库（不是直接 fs::copy，避免占用/损坏）
-/// 5. 提示重启生效（已打开的 AppState 持有旧路径，进程内不切换）
+/// 5. 写回后立即调用 db::init_db，把旧结构自动升级到当前版本，无需重启
 #[tauri::command]
 pub fn restore_backup(name: String, state: State<'_, AppState>) -> Result<String, String> {
     let dir = resolve_backup_dir(&state);
@@ -260,8 +260,12 @@ pub fn restore_backup(name: String, state: State<'_, AppState>) -> Result<String
             .map_err(|e| format!("恢复写入失败: {}", e))?;
     }
 
+    // 旧备份可能缺少新版本的表/列。写回后立刻跑一次迁移，避免用户不重启就
+    // 用旧结构触发 SQL 报错；迁移前会再留一份快照，且迁移本身是幂等的。
+    crate::db::init_db(current).map_err(|e| format!("恢复成功，但自动升级结构失败: {}", e))?;
+
     Ok(format!(
-        "已从 [{}] 恢复。当前库已先备份为 {}。请重启软件使新数据生效。",
+        "已从 [{}] 恢复并自动升级到当前结构。当前库已先备份为 {}。",
         name,
         safety.file_name().unwrap_or_default().to_string_lossy()
     ))
