@@ -10,6 +10,9 @@ function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 export const api = {
   listProjects: () => call<import('../types').Project[]>('list_projects'),
   openFolder: (path: string) => call<void>('open_folder', { path }),
+  openExternalUrl: (url: string) => call<void>('open_external_url', { url }),
+  resolveProjectPath: (base: string, relative: string) =>
+    call<string>('resolve_project_path', { base, relative }),
   createProject: (name: string, path: string, type: string, description: string) =>
     call<number>('create_project', { name, path, kind: type, description }),
   updateProject: (id: number, name: string, path: string, type: string, description: string) =>
@@ -29,7 +32,8 @@ export const api = {
       name: c.name,
       cmd: c.cmd,
       cwd: c.cwd ?? '',
-      shell: c.shell ?? 'powershell',
+      // 留空时由 platform 层按当前平台取默认值，不在前端写死
+      shell: c.shell ?? '',
       kind: c.type ?? 'custom',
       timeoutMs: c.timeout_ms ?? 0,
       sortOrder: c.sort_order ?? 0,
@@ -74,6 +78,8 @@ export const api = {
   deleteScript: (id: number) => call<void>('delete_script', { id }),
 
   getSettings: () => call<Record<string, string>>('get_settings'),
+  getShellOptions: () => call<import('../types').ShellOption[]>('get_shell_options'),
+  getDefaultShell: () => call<string>('get_default_shell'),
   setSetting: (key: string, value: string) => call<void>('set_setting', { key, value }),
   setWindowTheme: (theme: string) => call<void>('set_window_theme', { theme }),
   dataDir: () => call<string>('data_dir'),
@@ -98,4 +104,36 @@ export const api = {
   runCompression: (profileId: number, inputPaths: string[]) =>
     call<string>('run_compression', { profileId, inputPaths }),
   stopCompression: (runId: string) => call<void>('stop_compression', { runId }),
+
+  // 数据同步
+  syncStart: () => call<void>('sync_start'),
+  syncStop: () => call<void>('sync_stop'),
+  syncStatus: () => call<import('../types').SyncStatus>('sync_status'),
+  syncSetDeviceName: (name: string) => call<void>('sync_set_device_name', { name }),
+  syncSetReceiveDir: (path: string) => call<void>('sync_set_receive_dir', { path }),
+  syncListDevices: () => call<import('../types').SyncDevice[]>('sync_list_devices'),
+  syncListPending: () => call<import('../types').SyncRequestEvent[]>('sync_list_pending'),
+  syncPairDevice: (ip: string) =>
+    call<import('../types').SyncDevice>('sync_pair_device', { ip }),
+  syncSetFavorite: (fingerprint: string, favorite: boolean) =>
+    call<void>('sync_set_favorite', { fingerprint, favorite }),
+  syncSetAlias: (fingerprint: string, alias: string) =>
+    call<void>('sync_set_alias', { fingerprint, alias }),
+  syncSetAutoAccept: (fingerprint: string, enabled: boolean) =>
+    call<void>('sync_set_auto_accept', { fingerprint, enabled }),
+  syncRemoveDevice: (fingerprint: string) => call<void>('sync_remove_device', { fingerprint }),
+  syncRespond: (requestId: string, accepted: boolean) =>
+    call<void>('sync_respond', { requestId, accepted }),
+  syncRespondSelected: (requestId: string, indices: number[]) =>
+    call<void>('sync_respond_selected', { requestId, indices }),
+  syncCancelSend: (ip: string, transferId: string) =>
+    call<void>('sync_cancel_send', { ip, transferId }),
+  syncSendText: (ip: string, text: string, kind: string, transferId: string) =>
+    call<void>('sync_send_text', { ip, text, kind, transferId }),
+  syncSendFiles: (ip: string, paths: string[], transferId: string) =>
+    call<void>('sync_send_files', { ip, paths, transferId }),
+  syncListHistory: (limit: number) =>
+    call<import('../types').SyncTransfer[]>('sync_list_history', { limit }),
+  syncClearHistory: () => call<void>('sync_clear_history'),
+  syncRegenerateIdentity: () => call<string>('sync_regenerate_identity'),
 };

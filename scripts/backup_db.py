@@ -15,7 +15,7 @@
 参数：
   --db    源数据库路径；不传则自动解析（优先读指针文件，再回退默认路径）
   --dir   备份目录；不传则读环境变量 RUNHELP_BACKUP_DIR，再回退坚果云默认目录
-  --keep  保留最近 N 份备份，超出的自动删除（默认 12）
+  --keep  保留最近 N 份本机备份，超出的自动删除（默认 12）；其它电脑前缀的文件不动
 """
 import argparse
 import json
@@ -129,12 +129,16 @@ def backup(src: Path, dst_dir: Path, keep: int) -> Path:
     print(f"[备份成功] {dst}")
     print(f"          项目数 {n}，大小 {size / 1024:.1f} KB")
 
-    # 保留最近 keep 份（按修改时间），只清理本脚本生成的 runhelp_*.db
+    # 保留最近 keep 份（按修改时间）。备份目录可能是坚果云同步目录，
+    # 里面同时放着其它电脑生成的备份，只能清理本机前缀的那一部分。
+    local_prefix = f"runhelp_{safe_hostname()}_"
+    all_files = [f for f in dst_dir.glob("runhelp_*.db") if f.is_file()]
     files = sorted(
-        (f for f in dst_dir.glob("runhelp_*.db") if f.is_file()),
+        (f for f in all_files if f.name.startswith(local_prefix)),
         key=lambda f: f.stat().st_mtime,
         reverse=True,
     )
+    other_count = len(all_files) - len(files)
     removed = 0
     for old in files[keep:]:
         try:
@@ -150,7 +154,8 @@ def backup(src: Path, dst_dir: Path, keep: int) -> Path:
                     sidecar.unlink()
                 except OSError:
                     pass
-    print(f"          备份目录现有 {min(len(files), keep)} 份，已清理 {removed} 份旧备份")
+    others = f"，其它电脑 {other_count} 份未清理" if other_count else ""
+    print(f"          本机备份保留 {min(len(files), keep)} 份，已清理 {removed} 份旧备份{others}")
     return dst
 
 

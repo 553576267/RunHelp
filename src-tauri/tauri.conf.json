@@ -20,6 +20,7 @@
         "resizable": true,
         "center": true,
         "maximized": false,
+        "visible": false,
         "dragDropEnabled": false,
         "backgroundColor": "#14161A"
       }

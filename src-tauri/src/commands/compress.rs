@@ -96,13 +96,15 @@ pub fn run_compression(
         );
     }
 
-    let python_path: String = conn
-        .query_row(
-            "SELECT value FROM settings WHERE key='python_path'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap_or_else(|_| "python".into());
+    let python_path = crate::platform::python_program(
+        &conn
+            .query_row(
+                "SELECT value FROM settings WHERE key='python_path'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap_or_default(),
+    );
 
     let script_source: String = match script_id {
         Some(sid) => conn

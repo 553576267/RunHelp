@@ -215,7 +215,7 @@ pub fn stop_run(run_id: String, state: State<'_, AppState>) -> Result<(), String
         .get(&run_id)
         .copied()
         .unwrap_or(-1);
-    finish_history(&state, history_id, "stopped", -1073741510);
+    finish_history(&state, history_id, "stopped", crate::platform::STOPPED_EXIT_CODE);
     Ok(())
 }
 

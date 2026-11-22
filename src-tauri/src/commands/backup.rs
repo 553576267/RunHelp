@@ -36,13 +36,15 @@ pub fn run_backup(app: AppHandle, state: State<'_, AppState>) -> Result<String, 
         .unwrap_or_else(|_| BUILTIN_BACKUP_FALLBACK.to_string());
 
     // python 解释器
-    let python_path: String = conn
-        .query_row(
-            "SELECT value FROM settings WHERE key='python_path'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap_or_else(|_| "python".into());
+    let python_path = crate::platform::python_program(
+        &conn
+            .query_row(
+                "SELECT value FROM settings WHERE key='python_path'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap_or_default(),
+    );
 
     // 备份目录：优先 settings.backup_dir，否则默认坚果云目录（与 settings.rs 一致）
     let backup_dir: String = conn
@@ -54,12 +56,7 @@ pub fn run_backup(app: AppHandle, state: State<'_, AppState>) -> Result<String, 
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| {
-            let home = std::env::var("USERPROFILE")
-                .or_else(|_| std::env::var("HOME"))
-                .unwrap_or_else(|_| "C:\\".to_string());
-            std::path::PathBuf::from(home)
-                .join("Nutstore")
-                .join("RunHelpBackups")
+            crate::platform::default_backup_dir()
                 .to_string_lossy()
                 .to_string()
         });

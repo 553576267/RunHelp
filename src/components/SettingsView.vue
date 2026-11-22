@@ -7,6 +7,7 @@ import type { Script, BackupInfo } from '../types';
 const notify = inject<(m: string) => void>('notify', () => {});
 const confirm = inject<(m: string, o?: { title?: string; danger?: boolean; confirmText?: string }) => Promise<boolean>>('confirm', async () => false);
 const settings = ref<Record<string, string>>({});
+const shellOptions = ref<{ value: string; label: string }[]>([]);
 const scripts = ref<Script[]>([]);
 const dataDir = ref('');
 const dbLocation = ref<{ current: string } | null>(null);
@@ -26,6 +27,12 @@ onMounted(async () => {
 
 async function load() {
   settings.value = await api.getSettings();
+  shellOptions.value = await api.getShellOptions();
+  // 存量 default_shell 在当前平台不可用时，界面显示平台默认值
+  const shell = settings.value.default_shell;
+  if (shell && !shellOptions.value.some((o) => o.value === shell)) {
+    settings.value.default_shell = await api.getDefaultShell();
+  }
   scripts.value = await api.listScripts();
   dataDir.value = await api.dataDir();
   dbLocation.value = await api.getDbLocation();
@@ -178,9 +185,7 @@ async function pickPython() {
         <label>{{ t('默认 Shell') }}</label>
         <div class="row">
           <select v-model="settings.default_shell" class="select">
-            <option value="powershell">PowerShell</option>
-            <option value="cmd">CMD</option>
-            <option value="bash">Git Bash</option>
+            <option v-for="opt in shellOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
           </select>
           <button class="btn" @click="saveSetting('default_shell')">{{ t('保存') }}</button>
         </div>

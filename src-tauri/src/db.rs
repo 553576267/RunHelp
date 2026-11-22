@@ -7,6 +7,8 @@ use rusqlite::{Connection, OpenFlags, Transaction};
 
 const MIGRATION_001: &str = include_str!("../../migrations/001_init.sql");
 const MIGRATION_002: &str = include_str!("../../migrations/002_recycle.sql");
+const MIGRATION_004: &str = include_str!("../../migrations/004_sync.sql");
+const MIGRATION_005: &str = include_str!("../../migrations/005_sync_fingerprint.sql");
 const BUILTIN_COMPRESS: &str = include_str!("../../scripts/compress_images.py");
 const BUILTIN_BACKUP: &str = include_str!("../../scripts/backup_db.py");
 
@@ -15,7 +17,7 @@ const BUILTIN_BACKUP: &str = include_str!("../../scripts/backup_db.py");
 pub const LOCATION_FILE: &str = "db_location.json";
 
 /// 当前库结构版本。新增迁移时递增，并在 migrate() 里追加对应步骤。
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// 迁移前自动备份的存放目录（相对于数据库所在目录）。
 const MIGRATION_BACKUP_DIR: &str = "migration_backups";
@@ -107,7 +109,15 @@ fn migrate(conn: &mut Connection, from: u32) -> Result<(), String> {
     if from < 2 {
         migrate_to_v2(&tx)?;
     }
-    // 后续新增表结构改动时：if from < 3 { migrate_to_v3(&tx)?; } 并把 SCHEMA_VERSION 改成 3。
+    if from < 3 {
+        migrate_to_v3(&tx)?;
+    }
+    if from < 4 {
+        migrate_to_v4(&tx)?;
+    }
+    if from < 5 {
+        migrate_to_v5(&tx)?;
+    }
 
     set_schema_version(&tx, SCHEMA_VERSION)?;
     tx.commit().map_err(|e| crate::i18n::trf(&lang, "提交数据库迁移失败: {error}", &[("error", &e.to_string())]))
@@ -135,6 +145,73 @@ fn migrate_to_v2(conn: &Transaction<'_>) -> Result<(), String> {
     }
     conn.execute_batch(MIGRATION_002)
         .map_err(|e| crate::i18n::trf(&lang, "数据库迁移失败: {error}", &[("error", &e.to_string())]))
+}
+
+/// v3：刷新内置脚本源码。备份/压缩脚本随程序升级，但用户改过的版本（version>=2）
+/// 必须保留，所以只更新 version=1 的原始副本。
+fn migrate_to_v3(conn: &Transaction<'_>) -> Result<(), String> {
+    let lang = crate::i18n::lang_from_conn(conn);
+    for (name, source) in [
+        ("内置数据库备份脚本", BUILTIN_BACKUP),
+        ("内置图片压缩脚本", BUILTIN_COMPRESS),
+    ] {
+        conn.execute(
+            "UPDATE scripts SET content=?1, updated_at=datetime('now','localtime') \
+             WHERE name=?2 AND source_type='builtin' AND version=1",
+            rusqlite::params![source, name],
+        )
+        .map_err(|e| crate::i18n::trf(&lang, "数据库迁移失败: {error}", &[("error", &e.to_string())]))?;
+    }
+    Ok(())
+}
+
+/// v4：数据同步设备表与传输历史表（建表脚本幂等）。
+fn migrate_to_v4(conn: &Transaction<'_>) -> Result<(), String> {
+    let lang = crate::i18n::lang_from_conn(conn);
+    conn.execute_batch(MIGRATION_004)
+        .map_err(|e| crate::i18n::trf(&lang, "数据库迁移失败: {error}", &[("error", &e.to_string())]))
+}
+
+/// 检测表中是否存在某列（ADD COLUMN 不幂等，必须先判断）。
+fn column_exists(conn: &Transaction<'_>, table: &str, column: &str) -> bool {
+    conn.prepare(&format!("PRAGMA table_info({})", table))
+        .and_then(|mut s| {
+            let rows = s.query_map([], |r| r.get::<_, String>(1))?;
+            for name in rows {
+                if name? == column {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        })
+        .unwrap_or(false)
+}
+
+/// v5：设备身份升级为证书指纹 + 收藏/别名/最后 IP。
+/// 老库按 device_id 记录的可信设备没有指纹，mTLS 无法校验 —— 标记需要重新配对（清空 trusted）。
+fn migrate_to_v5(conn: &Transaction<'_>) -> Result<(), String> {
+    let lang = crate::i18n::lang_from_conn(conn);
+    let err = |e: rusqlite::Error| crate::i18n::trf(&lang, "数据库迁移失败: {error}", &[("error", &e.to_string())]);
+    if !column_exists(conn, "sync_devices", "fingerprint") {
+        conn.execute("ALTER TABLE sync_devices ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''", [])
+            .map_err(err)?;
+    }
+    if !column_exists(conn, "sync_devices", "favorite") {
+        conn.execute("ALTER TABLE sync_devices ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0", [])
+            .map_err(err)?;
+    }
+    if !column_exists(conn, "sync_devices", "alias") {
+        conn.execute("ALTER TABLE sync_devices ADD COLUMN alias TEXT NOT NULL DEFAULT ''", [])
+            .map_err(err)?;
+    }
+    if !column_exists(conn, "sync_devices", "last_ip") {
+        conn.execute("ALTER TABLE sync_devices ADD COLUMN last_ip TEXT NOT NULL DEFAULT ''", [])
+            .map_err(err)?;
+    }
+    // 没有指纹的老记录失去身份凭据，撤销可信，要求用户重新 TOFU 配对
+    conn.execute("UPDATE sync_devices SET trusted=0 WHERE fingerprint=''", [])
+        .map_err(err)?;
+    conn.execute_batch(MIGRATION_005).map_err(err)
 }
 
 /// 迁移前快照：用 SQLite 在线备份 API，而不是 fs::copy，避免漏掉 WAL 中的数据。

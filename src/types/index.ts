@@ -8,13 +8,19 @@ export interface Project {
   updated_at: string;
 }
 
+export interface ShellOption {
+  value: string;
+  label: string;
+}
+
 export interface Command {
   id: number;
   project_id: number;
   name: string;
   cmd: string;
   cwd: string;
-  shell: 'powershell' | 'cmd' | 'bash';
+  // 具体取值由后端按平台提供（Windows: powershell/cmd/bash；Unix: bash/sh）
+  shell: string;
   type: 'install' | 'build' | 'run' | 'custom';
   timeout_ms: number;
   sort_order: number;
@@ -131,3 +137,76 @@ export const defaultCompressionParams: CompressionParams = {
   overwrite: false,
   min_size_kb: 0,
 };
+
+// ===== 数据同步 =====
+export interface SyncDevice {
+  id: string;
+  name: string;
+  platform: string;
+  ip: string;
+  port: number;
+  fingerprint: string;
+  last_seen: number;
+  trusted: boolean;
+  auto_accept: boolean;
+  favorite: boolean;
+  alias: string;
+  last_ip: string;
+  online: boolean;
+}
+
+export interface SyncStatus {
+  device_id: string;
+  device_name: string;
+  fingerprint: string;
+  fingerprint_short: string;
+  receive_dir: string;
+  running: boolean;
+  port: number;
+}
+
+export interface SyncRequestItem {
+  name: string;
+  size: number;
+}
+
+export interface SyncRequestEvent {
+  id: string;
+  transfer_id: string;
+  from: string;
+  from_platform: string;
+  fingerprint: string;
+  trusted: boolean;
+  kind: string;
+  name: string;
+  size: number;
+  count: number;
+  items: SyncRequestItem[];
+}
+
+export interface SyncReceivedEvent {
+  kind: string;
+  name: string;
+  from: string;
+  text: string;
+  path: string;
+}
+
+export interface SyncProgressEvent {
+  transfer_id: string;
+  sent: number;
+  total: number;
+  status: string;
+}
+
+export interface SyncTransfer {
+  id: number;
+  direction: string;
+  peer: string;
+  kind: string;
+  name: string;
+  size: number;
+  status: string;
+  error: string;
+  created_at: string;
+}

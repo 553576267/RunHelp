@@ -5,8 +5,30 @@ use tauri::State;
 use crate::models::Project;
 use crate::state::AppState;
 
-/// 在项目地址上点击时，用系统资源管理器打开对应本地目录。
-/// 走 explorer.exe 而非 shell:allow-open（后者当前只白名单了仓库 URL）。
+/// 把项目根目录与用户填写的相对工作目录拼成完整路径。
+/// 一律走 PathBuf，避免前端手写反斜杠/盘符判断；相对值为绝对路径时按 Rust 语义直接替换基准。
+#[tauri::command]
+pub fn resolve_project_path(
+    base: String,
+    relative: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let lang = crate::i18n::lang(&state);
+    let root = base.trim();
+    if root.is_empty() {
+        return Err(crate::i18n::tr(&lang, "项目路径为空"));
+    }
+    let joined = if relative.trim().is_empty() {
+        Path::new(root).to_path_buf()
+    } else {
+        Path::new(root).join(relative.trim())
+    };
+    Ok(joined.to_string_lossy().to_string())
+}
+
+/// 在项目地址上点击时，用系统文件管理器打开对应本地目录。
+/// 走后端命令而非 shell:allow-open（后者当前只白名单了仓库 URL）；
+/// 具体平台的文件管理器调用见 platform 层。
 #[tauri::command]
 pub fn open_folder(path: String, state: State<'_, AppState>) -> Result<(), String> {
     let lang = crate::i18n::lang(&state);
@@ -16,12 +38,22 @@ pub fn open_folder(path: String, state: State<'_, AppState>) -> Result<(), Strin
     if !Path::new(&path).is_dir() {
         return Err(crate::i18n::trf(&lang, "目录不存在: {path}", &[("path", &path)]));
     }
-    // explorer 传目录路径即可打开；spawn 后立即返回，不等待窗口关闭
-    std::process::Command::new("explorer")
-        .arg(&path)
-        .spawn()
+    // 用系统文件管理器打开；spawn 后立即返回，不等待窗口关闭
+    crate::platform::open_folder(&path)
         .map_err(|e| crate::i18n::trf(&lang, "打开目录失败: {error}", &[("error", &e.to_string())]))?;
     Ok(())
+}
+
+/// 用系统默认浏览器打开外部链接。只接受 http/https，避免被当成任意协议入口。
+#[tauri::command]
+pub fn open_external_url(url: String, state: State<'_, AppState>) -> Result<(), String> {
+    let lang = crate::i18n::lang(&state);
+    let lower = url.trim().to_ascii_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+        return Err(crate::i18n::tr(&lang, "只支持 http/https 链接"));
+    }
+    crate::platform::open_url(url.trim())
+        .map_err(|e| crate::i18n::trf(&lang, "打开链接失败: {error}", &[("error", &e.to_string())]))
 }
 
 fn query_projects(state: &AppState, deleted: bool) -> Result<Vec<Project>, String> {

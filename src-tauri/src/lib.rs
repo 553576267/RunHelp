@@ -2,20 +2,16 @@ pub mod commands;
 pub mod db;
 pub mod i18n;
 pub mod models;
+pub mod platform;
 pub mod process;
 pub mod state;
+pub mod sync;
 
 use tauri::{Manager, RunEvent};
 
 pub fn run() {
-    // 借鉴 Projects Runner / fix-path-env：Windows 下 GUI 应用从资源管理器或
-    // 父进程启动时，std::process::Command 对 PATH 的继承有已知 bug（拿到的是
-    // 陈旧的进程快照）。启动时把 PATH 显式读出来再写回，强制刷新环境快照，
-    // 保证后续 spawn 的子进程看到的是当前真实的 PATH。
-    #[cfg(windows)]
-    if let Ok(path) = std::env::var("PATH") {
-        std::env::set_var("PATH", path);
-    }
+    // 刷新 PATH 环境快照（Windows GUI 启动的已知问题，实现见 platform 层）
+    platform::refresh_path_env();
 
     // 单实例插件必须是第一个注册的插件：重复双击图标时不再新开进程，
     // 而是把已经运行的窗口显示 / 取消最小化 / 置前。
@@ -35,6 +31,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        // 记住窗口大小/位置/最大化状态，下次启动自动恢复（默认存到 AppData/Roaming/...）。
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(|app| {
             let data_dir = app
                 .path()
@@ -42,12 +42,45 @@ pub fn run() {
                 .map_err(|e| format!("无法获取数据目录: {}", e))?;
             let db_path = db::resolve_db_path(&data_dir);
             db::init_db(&db_path)?;
-            app.manage(state::AppState::new(db_path));
+            // 设备身份：自签证书持久化，指纹重启不变；可信指纹从库加载
+            let (identity, trusted_fps) = {
+                let conn = rusqlite::Connection::open(&db_path)
+                    .map_err(|e| format!("打开数据库失败: {}", e))?;
+                let id = sync::identity::load_or_create(&data_dir)
+                    .map_err(|e| format!("加载设备身份失败: {}", e))?;
+                let fps: std::collections::HashSet<String> = conn
+                    .prepare("SELECT fingerprint FROM sync_devices WHERE trusted=1 AND fingerprint<>''")
+                    .ok()
+                    .and_then(|mut s| {
+                        s.query_map([], |r| r.get::<_, String>(0)).ok().map(|rows| {
+                            rows.filter_map(|r| r.ok()).collect()
+                        })
+                    })
+                    .unwrap_or_default();
+                (id, fps)
+            };
+            let sync_runtime = std::sync::Arc::new(sync::SyncRuntime::new(identity, trusted_fps));
+            let app_state = state::AppState::new(db_path, sync_runtime);
+            *app_state
+                .app_handle
+                .lock()
+                .map_err(|e| format!("初始化同步事件句柄失败: {}", e))? = Some(app.handle().clone());
+            state::AppState::set_global(app_state.clone());
+            app.manage(app_state);
+
+            // 窗口初始隐藏（tauri.conf.json visible:false），等 window-state 恢复完
+            // 上次的尺寸/位置后再显示，避免先显示默认小窗口再变大造成闪烁。
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::project::list_projects,
+            commands::project::resolve_project_path,
             commands::project::open_folder,
+            commands::project::open_external_url,
             commands::project::create_project,
             commands::project::update_project,
             commands::project::delete_project,
@@ -77,6 +110,8 @@ pub fn run() {
             commands::script::save_script,
             commands::script::delete_script,
             commands::settings::get_settings,
+            commands::settings::get_shell_options,
+            commands::settings::get_default_shell,
             commands::settings::set_setting,
             commands::settings::set_window_theme,
             commands::settings::data_dir,
@@ -90,6 +125,26 @@ pub fn run() {
             commands::compress::delete_profile,
             commands::compress::run_compression,
             commands::compress::stop_compression,
+            sync::commands::sync_start,
+            sync::commands::sync_stop,
+            sync::commands::sync_status,
+            sync::commands::sync_list_pending,
+            sync::commands::sync_set_device_name,
+            sync::commands::sync_set_receive_dir,
+            sync::commands::sync_list_devices,
+            sync::commands::sync_pair_device,
+            sync::commands::sync_set_favorite,
+            sync::commands::sync_set_alias,
+            sync::commands::sync_set_auto_accept,
+            sync::commands::sync_remove_device,
+            sync::commands::sync_respond,
+            sync::commands::sync_respond_selected,
+            sync::commands::sync_cancel_send,
+            sync::commands::sync_send_text,
+            sync::commands::sync_send_files,
+            sync::commands::sync_list_history,
+            sync::commands::sync_clear_history,
+            sync::commands::sync_regenerate_identity,
         ])
         .build(tauri::generate_context!())
         .expect("构建 Tauri 应用失败")

@@ -85,14 +85,8 @@ pub fn get_db_location(state: State<'_, AppState>) -> Result<DbLocation, String>
 
 // ───────────────────────── 数据库备份与恢复 ─────────────────────────
 
-/// 默认备份目录：坚果云同步目录下的 RunHelpBackups。
-fn default_backup_dir() -> PathBuf {
-    // USERPROFILE 在 Windows 恒存在；回退到 HOME。
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| "C:\\".to_string());
-    PathBuf::from(home).join("Nutstore").join("RunHelpBackups")
-}
+/// 默认备份目录统一由 platform 层提供（坚果云同步目录），
+/// 避免 settings / backup / Python 脚本三处各写一套。
 
 /// 解析实际备份目录：优先 settings.backup_dir，否则默认坚果云目录。
 /// 与 Python 脚本 backup_db.py 的 resolve_backup_dir 保持一致。
@@ -113,7 +107,7 @@ fn resolve_backup_dir(state: &AppState) -> PathBuf {
             return PathBuf::from(v.trim());
         }
     }
-    default_backup_dir()
+    crate::platform::default_backup_dir()
 }
 
 #[derive(serde::Serialize)]
@@ -133,7 +127,49 @@ pub struct BackupInfo {
 /// 默认备份目录（供前端在未配置时预填输入框）
 #[tauri::command]
 pub fn get_default_backup_dir() -> Result<String, String> {
-    Ok(default_backup_dir().to_string_lossy().to_string())
+    Ok(crate::platform::default_backup_dir().to_string_lossy().to_string())
+}
+
+/// 当前平台可用的 Shell 选项（值用于落库，标签由 i18n 字典提供）。
+#[derive(serde::Serialize)]
+pub struct ShellOption {
+    pub value: String,
+    pub label: String,
+}
+
+#[tauri::command]
+pub fn get_shell_options(state: State<'_, AppState>) -> Result<Vec<ShellOption>, String> {
+    let lang = crate::i18n::lang(&state);
+    Ok(crate::platform::available_shells()
+        .iter()
+        .map(|kind| ShellOption {
+            value: kind.key().to_string(),
+            label: crate::i18n::tr(&lang, kind.label_key()),
+        })
+        .collect())
+}
+
+/// 默认 Shell 的唯一来源：读设置里的 default_shell，并把不适配当前平台的老值映射过来。
+#[tauri::command]
+pub fn get_default_shell(state: State<'_, AppState>) -> Result<String, String> {
+    let saved = state
+        .conn()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT value FROM settings WHERE key='default_shell'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+        })
+        .unwrap_or_default();
+    let shell = if saved.trim().is_empty() {
+        crate::platform::default_shell()
+    } else {
+        crate::platform::normalize_shell(saved.trim())
+    };
+    Ok(shell.key().to_string())
 }
 
 /// 列出备份目录里的 runhelp_*.db 文件，按修改时间倒序。
@@ -144,9 +180,9 @@ pub fn list_backups(state: State<'_, AppState>) -> Result<Vec<BackupInfo>, Strin
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
-    let local_host = std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .unwrap_or_default();
+    // 与备份脚本 gen/cleanup 使用同一套机器名规则，避免名字含空格等字符时
+    // 「本机」标签判断错误。
+    let local_prefix = crate::platform::local_backup_prefix();
     let mut files: Vec<BackupInfo> = Vec::new();
     let entries = fs::read_dir(&dir).map_err(|e| crate::i18n::trf(&lang, "读取备份目录失败: {error}", &[("error", &e.to_string())]))?;
     for entry in entries.flatten() {
@@ -188,7 +224,7 @@ pub fn list_backups(state: State<'_, AppState>) -> Result<Vec<BackupInfo>, Strin
             })
             .unwrap_or_default();
         files.push(BackupInfo {
-            local: !local_host.is_empty() && name.contains(&local_host),
+            local: name.starts_with(&local_prefix),
             name,
             path: p.to_string_lossy().to_string(),
             size: meta.len(),

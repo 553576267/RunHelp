@@ -2,7 +2,6 @@
 import { ref, onMounted, onUnmounted, provide, computed, watch, nextTick } from 'vue';
 import { listen } from '@tauri-apps/api/event';
 import { getVersion } from '@tauri-apps/api/app';
-import { open as openUrl } from '@tauri-apps/plugin-shell';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { api } from './lib/api';
 import { t, setLocale } from './lib/i18n';
@@ -11,11 +10,14 @@ import ProjectSidebar from './components/ProjectSidebar.vue';
 import CommandCenter from './components/CommandCenter.vue';
 import ImageCompress from './components/ImageCompress.vue';
 import SettingsView from './components/SettingsView.vue';
+import SyncView from './components/SyncView.vue';
 
 const projects = ref<Project[]>([]);
 const selected = ref<Project | null>(null);
-type MainTab = 'commands' | 'compress' | 'settings' | 'tasks';
+type MainTab = 'commands' | 'compress' | 'settings' | 'tasks' | 'sync';
 const tab = ref<MainTab>('commands');
+// 左下角「数据同步」按常驻项目处理：选中时页签栏只留同步 + 全局任务，点真实项目即退出
+const syncMode = ref(false);
 const logs = ref<LogEvent[]>([]);
 const activeRunId = ref<string>('');
 const toast = ref('');
@@ -110,6 +112,7 @@ const UI_STATE_KEY = 'runhelp.ui.state';
 interface UiState {
   selectedId: number | null;
   tab: MainTab;
+  syncMode?: boolean;
   consoleCollapsed?: boolean;
   consoleSize?: ConsoleSize;
   consoleCustomHeight?: number | null;
@@ -119,6 +122,7 @@ function saveUiState() {
     const state: UiState = {
       selectedId: selected.value?.id ?? null,
       tab: tab.value,
+      syncMode: syncMode.value,
       consoleCollapsed: consoleCollapsed.value,
       consoleSize: consoleSize.value,
       consoleCustomHeight: consoleCustomHeight.value,
@@ -141,6 +145,7 @@ const initialUiState = readUiState();
 let uiStateApplied = false;
 // 立即恢复日志面板状态，避免首屏闪烁
 if (initialUiState) {
+  if (typeof initialUiState.syncMode === 'boolean') syncMode.value = initialUiState.syncMode;
   if (typeof initialUiState.consoleCollapsed === 'boolean') consoleCollapsed.value = initialUiState.consoleCollapsed;
   if (initialUiState.consoleSize) consoleSize.value = initialUiState.consoleSize;
   if (typeof initialUiState.consoleCustomHeight === 'number') consoleCustomHeight.value = initialUiState.consoleCustomHeight;
@@ -192,17 +197,24 @@ async function loadRunning() {
   }
 }
 
-// 当前项目类型可用的页签（全局设置已移到右上角按钮，这里只留全局任务）
+// 普通项目的首个页签（同步常驻视图不参与此计算）
+function firstProjectTab(p: Project | null): MainTab {
+  if (!p) return 'tasks';
+  return p.type === 'image' ? 'compress' : 'commands';
+}
+
+// 当前可用的页签（全局设置已移到右上角按钮，这里只留全局任务）
 const availableTabs = computed<{ key: MainTab; label: string }[]>(() => {
+  const tasksTab: { key: MainTab; label: string } = { key: 'tasks', label: t('全局任务') };
+  const syncTab: { key: MainTab; label: string } = { key: 'sync', label: t('数据同步') };
+  // 同步常驻项目：同步页置顶，隐藏命令中心/图片压缩等项目页签，仅保留全局任务
+  if (syncMode.value) return [syncTab, tasksTab];
   const p = selected.value;
-  const globalTabs: { key: MainTab; label: string }[] = [
-    { key: 'tasks', label: t('全局任务') },
-  ];
-  if (!p) return globalTabs;
+  if (!p) return [tasksTab, syncTab];
   if (p.type === 'image') {
-    return [{ key: 'compress', label: t('图片压缩') }, ...globalTabs];
+    return [{ key: 'compress', label: t('图片压缩') }, tasksTab, syncTab];
   }
-  return [{ key: 'commands', label: t('命令中心') }, ...globalTabs];
+  return [{ key: 'commands', label: t('命令中心') }, tasksTab, syncTab];
 });
 
 // 全局设置虽不在页签栏，但仍是合法页签（由右上角按钮进入），需参与校验与持久化
@@ -210,10 +222,23 @@ function isTabAvailable(key: MainTab): boolean {
   return key === 'settings' || availableTabs.value.some((t) => t.key === key);
 }
 
-// 项目类型变化时，若当前页签不可用则自动切到第一个
+// 侧边栏「数据同步」按钮：toggle。进入即视作选中常驻项目，再点回到普通项目的默认页。
+function toggleSync() {
+  if (syncMode.value) {
+    syncMode.value = false;
+    tab.value = firstProjectTab(selected.value);
+  } else {
+    syncMode.value = true;
+    tab.value = 'sync';
+  }
+  saveUiState();
+}
+
+// 项目类型变化时，若当前页签不可用则自动切到第一个（同步常驻视图不受影响）
 watch(
   () => selected.value?.type,
   () => {
+    if (syncMode.value) return;
     if (!isTabAvailable(tab.value)) {
       tab.value = availableTabs.value[0]?.key ?? 'settings';
     }
@@ -233,10 +258,11 @@ watch(tab, (t) => {
 // 切换项目时持久化选中项
 watch(() => selected.value?.id, () => saveUiState());
 
-// 点击项目：切到该项目可用的第一个页签
+// 点击项目：退出同步常驻视图，切到该项目可用的第一个页签
 function selectProject(p: Project) {
+  syncMode.value = false;
   selected.value = p;
-  tab.value = availableTabs.value[0]?.key ?? 'settings';
+  tab.value = firstProjectTab(p);
 }
 
 function showToast(msg: string) {
@@ -275,7 +301,7 @@ async function copyLogs() {
 // 艺术字跳转开源仓库：WebView2 里 <a target=_blank> 会被拦截，改走系统默认浏览器
 async function openRepo() {
   try {
-    await openUrl('https://gitcode.com/binglengdexie/RunHelp');
+    await api.openExternalUrl('https://gitcode.com/binglengdexie/RunHelp');
   } catch {
     showToast(t('打开仓库失败'));
   }
@@ -297,7 +323,10 @@ async function loadProjects() {
   // 恢复页签；失效时按当前项目回退到第一个可用页签
   if (saved?.tab && isTabAvailable(saved.tab)) {
     tab.value = saved.tab;
-  } else if (!selected.value) {
+    // 兼容旧状态：页签是同步但没有 syncMode 字段时，仍视为同步常驻视图
+    if (saved.tab === 'sync') syncMode.value = true;
+  } else {
+    // 同步模式会跳过项目类型 watch，这里兜底回退到当前模式的第一个页签
     tab.value = availableTabs.value[0]?.key ?? 'settings';
   }
 }
@@ -311,7 +340,8 @@ function onProjectDeleted(id: number) {
   projects.value = projects.value.filter((p) => p.id !== id);
   if (selected.value?.id === id) {
     selected.value = projects.value[0] ?? null;
-    if (!selected.value) tab.value = 'settings';
+    // 同步是常驻视图，项目被删光时也不把它顶掉
+    if (!selected.value && !syncMode.value) tab.value = 'settings';
   }
 }
 
@@ -574,11 +604,13 @@ onUnmounted(() => {
       <ProjectSidebar
         :projects="projects"
         :selected="selected"
+        :sync-active="syncMode"
         @created="onProjectCreated"
         @deleted="onProjectDeleted"
         @updated="onProjectUpdated"
         @restored="onProjectRestored"
         @select="selectProject"
+        @toggle-sync="toggleSync"
       />
     </aside>
 
@@ -622,6 +654,7 @@ onUnmounted(() => {
             @run="onRun"
           />
           <SettingsView v-else-if="tab === 'settings'" />
+          <SyncView v-else-if="tab === 'sync'" />
 
           <!-- 全局任务：跨项目查看并管理所有运行中任务与历史 -->
           <div v-else-if="tab === 'tasks'" class="task-page">

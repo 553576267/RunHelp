@@ -68,32 +68,6 @@ impl Utf8StreamDecoder {
     }
 }
 
-/// 按 shell 类型构建命令。
-/// cmd 分支保留 chcp 65001；powershell 用 -NoProfile -ExecutionPolicy Bypass，
-/// 并显式把 Input/Output/OutputEncoding 设为 UTF-8，避免中文输出乱码。
-fn shell_command(shell: &str, cmd: &str) -> (String, Vec<String>) {
-    match shell.to_lowercase().as_str() {
-        "cmd" => (
-            "cmd.exe".into(),
-            vec!["/C".into(), format!("chcp 65001 >nul && {}", cmd)],
-        ),
-        "bash" | "git-bash" => ("bash".into(), vec!["-lc".into(), cmd.into()]),
-        _ => (
-            "powershell.exe".into(),
-            vec![
-                "-NoProfile".into(),
-                "-ExecutionPolicy".into(),
-                "Bypass".into(),
-                "-Command".into(),
-                format!(
-                    "$OutputEncoding = [Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); {}",
-                    cmd
-                ),
-            ],
-        ),
-    }
-}
-
 fn emit_line(app: &AppHandle, run_id: &str, stream: &str, line: String) {
     let _ = app.emit(
         "run://log",
@@ -123,10 +97,7 @@ fn apply_python_path(state: &AppState, proc_cmd: &mut ProcCommand) -> String {
         })
         .unwrap_or_default();
     let trimmed = python_path.trim();
-    if trimmed.is_empty()
-        || trimmed.eq_ignore_ascii_case("python")
-        || trimmed.eq_ignore_ascii_case("python.exe")
-    {
+    if trimmed.is_empty() || crate::platform::is_plain_python_token(trimmed) {
         // 未配置具体解释器时不输出提示，避免每次运行都刷一行
         return String::new();
     }
@@ -146,31 +117,9 @@ fn apply_python_path(state: &AppState, proc_cmd: &mut ProcCommand) -> String {
     } else {
         p
     };
-    let dir_str = dir.to_string_lossy().to_string();
+    // 过滤父进程注入的干扰路径、前置指定解释器目录（平台差异见 platform 层）
     let existing = std::env::var("PATH").unwrap_or_default();
-    // 过滤掉父进程（如 WorkBuddy）注入的干扰路径，保留用户正常环境变量，
-    // 再把指定 python 目录提到最前。
-    let mut parts: Vec<String> = existing
-        .split(';')
-        .filter(|s| {
-            if s.is_empty() {
-                return false;
-            }
-            let low = s.to_lowercase();
-            if low.contains("workbuddy") && (low.contains("python") || low.contains("binaries")) {
-                return false;
-            }
-            if low.contains("windowsapps") && low.contains("python") {
-                return false;
-            }
-            !s.eq_ignore_ascii_case(&dir_str)
-        })
-        .map(|s| s.to_string())
-        .collect();
-    let scripts_dir = dir.join("Scripts").to_string_lossy().to_string();
-    parts.insert(0, dir_str.clone());
-    parts.insert(1, scripts_dir.clone());
-    let new_path = parts.join(";");
+    let new_path = crate::platform::build_python_path(&existing, dir);
     proc_cmd.env("PATH", new_path);
     crate::i18n::trf(&lang, "━━━ 【RunHelp】解释器: {path} ━━━", &[("path", trimmed)])
 }
@@ -237,16 +186,8 @@ pub fn execute(
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .env("PYTHONIOENCODING", "utf-8");
 
-    // Windows 下 GUI 应用启动控制台子进程会弹出一个黑窗口。用户关掉它等于
-    // 向整个进程组发 CTRL_CLOSE 信号，会把 python 服务一起杀掉（退出码
-    // -1073741510 = 0xC000013A），既误导又影响使用。CREATE_NO_WINDOW 让
-    // 子进程无控制台静默运行，stdout/stderr 仍走上面的管道捕获到界面。
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        proc_cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+    // 隐藏子进程控制台窗口（Windows 专属行为，实现见 platform 层）
+    crate::platform::apply_no_window_flags(proc_cmd);
 
     let mut child = match proc_cmd.spawn() {
         Ok(c) => c,
@@ -344,15 +285,11 @@ pub fn execute(
     state.runtime.history_ids.lock().unwrap().remove(run_id);
     let code = final_code;
 
-    // 0xC000013A (STATUS_CONTROL_C_EXIT)：控制台窗口被关闭 / Ctrl+C 中断，
-    // 这不是程序失败，而是用户主动结束了常驻服务，归为 stopped。
-    #[cfg(windows)]
-    let ctrl_close = code == -1073741510; // STATUS_CONTROL_C_EXIT (0xC000013A)
-    #[cfg(not(windows))]
-    let ctrl_close = code == 130;
+    // 用户主动中断（关控制台 / Ctrl+C）归为 stopped 而非 failed，判定见 platform 层
+    let user_abort = crate::platform::is_user_abort(code);
     let status_text = if timed_out {
         "timeout"
-    } else if was_stopped || ctrl_close {
+    } else if was_stopped || user_abort {
         "stopped"
     } else if code == 0 {
         "success"
@@ -390,9 +327,10 @@ pub fn run_shell(
     label: &str,
 ) -> Result<(i32, String), String> {
     let lang = crate::i18n::lang(state);
-    let (program, args) = shell_command(shell, cmd);
-    let mut proc_cmd = ProcCommand::new(program);
-    proc_cmd.args(&args);
+    // 只消费抽象后的命令描述，具体 shell 拼接由 platform 层按平台实现。
+    let spec = crate::platform::build_command_spec(shell, cmd);
+    let mut proc_cmd = ProcCommand::new(spec.program);
+    proc_cmd.args(&spec.args);
     if !cwd.is_empty() {
         let p = Path::new(cwd);
         if p.exists() {
@@ -416,20 +354,10 @@ pub fn run_shell(
     execute(app, state, run_id, &mut proc_cmd, timeout_ms, label)
 }
 
+/// 兼容转发：平台实现已收敛到 platform 层，保留本入口让既有调用方
+/// （backup / command / compress / lib）无需改动。新代码可直接调 platform::kill_tree。
 pub fn kill_tree(pid: u32) {
-    #[cfg(windows)]
-    {
-        let _ = ProcCommand::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-    #[cfg(not(windows))]
-    {
-        use std::process::Command as C;
-        let _ = C::new("kill").arg("-TERM").arg(pid.to_string()).status();
-    }
+    crate::platform::kill_tree(pid);
 }
 
 pub fn wait_if_paused(state: &AppState, run_id: &str) {

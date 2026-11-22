@@ -52,13 +52,19 @@ impl RuntimeState {
 pub struct AppState {
     pub db_path: PathBuf,
     pub runtime: Arc<RuntimeState>,
+    /// 数据同步运行态（设备列表、配对码、待确认请求等）
+    pub sync: Arc<crate::sync::SyncRuntime>,
+    /// app.handle() 的持有者：供后台 HTTP 线程发射事件用
+    pub app_handle: Arc<Mutex<Option<tauri::AppHandle>>>,
 }
 
 impl AppState {
-    pub fn new(db_path: PathBuf) -> Self {
+    pub fn new(db_path: PathBuf, sync: Arc<crate::sync::SyncRuntime>) -> Self {
         Self {
             db_path,
             runtime: Arc::new(RuntimeState::new()),
+            sync,
+            app_handle: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -78,4 +84,30 @@ impl AppState {
             })
             .unwrap_or_default()
     }
+
+    // 以下静态访问器供后台线程（HTTP 服务）使用：它们拿不到 tauri::State，
+    // 因此用一个 OnceLock 保存 AppState 的克隆。只在 setup 里赋值一次。
+
+    fn global() -> Option<&'static AppState> {
+        GLOBAL_STATE.get()
+    }
+
+    pub fn set_global(state: AppState) {
+        let _ = GLOBAL_STATE.set(state);
+    }
+
+    pub fn open_db_for_sync() -> Option<Connection> {
+        Self::global().and_then(|s| s.conn().ok())
+    }
+
+    pub fn app_handle_for_sync() -> Option<tauri::AppHandle> {
+        Self::global()
+            .and_then(|s| s.app_handle.lock().ok().and_then(|g| g.clone()))
+    }
+
+    pub fn sync_holder_for_sync() -> Option<Arc<crate::sync::SyncRuntime>> {
+        Self::global().map(|s| s.sync.clone())
+    }
 }
+
+static GLOBAL_STATE: std::sync::OnceLock<AppState> = std::sync::OnceLock::new();

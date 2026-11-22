@@ -2,6 +2,7 @@
 import { ref, watch, inject, computed, onMounted, onUnmounted } from 'vue';
 import { api } from '../lib/api';
 import { t } from '../lib/i18n';
+import { useActionFeedback } from '../lib/useActionFeedback';
 import type { Project, Command, RunningInfo, Pipeline } from '../types';
 import PipelineEditor from './PipelineEditor.vue';
 
@@ -10,16 +11,14 @@ const emit = defineEmits<{ (e: 'run', id: string): void; (e: 'clear-logs'): void
 const notify = inject<(m: string) => void>('notify', () => {});
 const confirm = inject<(m: string, o?: { title?: string; danger?: boolean; confirmText?: string }) => Promise<boolean>>('confirm', async () => false);
 
-type ShellType = 'powershell' | 'cmd' | 'bash';
-
 const commands = ref<Command[]>([]);
 const pipelines = ref<Pipeline[]>([]);
-// 全局默认 shell：命令页每次挂载时读取，让设置页的「默认 Shell」真正生效
-const defaultShell = ref<ShellType>('powershell');
-// 正在启动中的项（方案 A 防抖）：key 用 "c:id"/"p:id" 区分命令与流水线，避免 id 撞号
-const startingIds = ref<Set<string>>(new Set());
-// 防抖定时器：点击后固定冷却 600ms 再释放，给按钮稳定的启动反馈（无需等待 IPC 返回）
-const debounceTimers = new Map<string, number>();
+// Shell 选项与默认值都由后端按平台提供，前端不再写死 PowerShell/CMD
+const shellOptions = ref<{ value: string; label: string }[]>([]);
+const defaultShell = ref<string>('');
+// 正在启动中的项（统一按钮反馈）：key 用 "c:id"/"p:id" 区分命令与流水线，避免 id 撞号。
+// 冷却 600ms、图标原地旋转、期间重复点击忽略，规则由 useActionFeedback 统一定义，全平台一致。
+const { activeKeys: startingIds, isActive: isStarting, trigger: markStarting, clear: clearStarting } = useActionFeedback({ cooldownMs: 600 });
 // 每个命令正在运行的实例数（来自全局 running 列表，按 command_id 精确匹配，用于左下角角标）
 const runningCount = computed(() => {
   const m = new Map<number, number>();
@@ -37,17 +36,6 @@ const pipelineRunningCount = computed(() => {
   return m;
 });
 
-// 统一防抖：返回 false 表示冷却期内、忽略本次点击；否则标记启动并 600ms 后释放
-function markStarting(key: string): boolean {
-  if (startingIds.value.has(key)) return false;
-  startingIds.value.add(key);
-  const timer = window.setTimeout(() => {
-    startingIds.value.delete(key);
-    debounceTimers.delete(key);
-  }, 600);
-  debounceTimers.set(key, timer);
-  return true;
-}
 const showCommandModal = ref(false);
 const showPipeline = ref(false);
 const showAdhoc = ref(false);
@@ -56,27 +44,26 @@ const editing = ref<Command | null>(null);
 const editingPipeline = ref<Pipeline | null>(null);
 
 // 临时命令：不保存，直接运行（适合快速测试 python server.py 之类）
-const adhoc = ref({ cmd: '', shell: 'powershell' as ShellType, cwd: '' });
+const adhoc = ref({ cmd: '', shell: '', cwd: '' });
 
 const form = ref({
   name: '',
   cmd: '',
   cwd: '',
-  shell: 'powershell' as ShellType,
+  shell: '',
   type: 'custom',
   timeout_ms: 0,
 });
 
 onMounted(async () => {
   try {
-    const s = (await api.getSettings()).default_shell;
-    if (s === 'cmd' || s === 'bash' || s === 'powershell') {
-      defaultShell.value = s;
-      // 同步到两个表单的当前值（仅在用户还没输入时，避免覆盖正在编辑的内容）
-      form.value.shell = s;
-      adhoc.value.shell = s;
-    }
-  } catch { /* 读取失败则保持默认 powershell */ }
+    shellOptions.value = await api.getShellOptions();
+    const s = await api.getDefaultShell();
+    defaultShell.value = s;
+    // 同步到两个表单的当前值（仅在用户还没输入时，避免覆盖正在编辑的内容）
+    form.value.shell = s;
+    adhoc.value.shell = s;
+  } catch { /* 后端异常时保持空值，platform 层仍会按平台回落 */ }
 });
 
 watch(
@@ -124,7 +111,8 @@ function openEdit(c: Command) {
     name: c.name,
     cmd: c.cmd,
     cwd: c.cwd,
-    shell: c.shell,
+    // 老数据里的 shell 若不在当前平台选项中，回落到平台默认值
+    shell: shellOptions.value.some((o) => o.value === c.shell) ? c.shell : defaultShell.value,
     type: c.type,
     timeout_ms: c.timeout_ms,
   };
@@ -139,7 +127,7 @@ async function saveCommand() {
   try {
     await api.saveCommand({
       ...form.value,
-      shell: form.value.shell as 'powershell' | 'cmd' | 'bash',
+      shell: form.value.shell,
       type: form.value.type as 'install' | 'build' | 'run' | 'custom',
       id: editing.value?.id,
       project_id: props.project.id,
@@ -173,8 +161,7 @@ async function run(c: Command) {
 }
 
 onUnmounted(() => {
-  for (const t of debounceTimers.values()) window.clearTimeout(t);
-  debounceTimers.clear();
+  clearStarting();
 });
 
 async function runAdhoc() {
@@ -183,15 +170,10 @@ async function runAdhoc() {
     notify(t('请输入命令'));
     return;
   }
-  // 工作目录：填了就用（相对路径拼到项目根），没填用项目根
-  let cwd = '';
+  // 工作目录：相对路径拼到项目根、留空用项目根，拼接统一交给后端 PathBuf
+  let cwd = adhoc.value.cwd.trim();
   if (props.project) {
-    cwd = adhoc.value.cwd.trim();
-    if (cwd && !/^[A-Za-z]:[\\/]/.test(cwd)) {
-      cwd = `${props.project.path.replace(/[\\/]+$/, '')}\\${cwd}`;
-    } else if (!cwd) {
-      cwd = props.project.path;
-    }
+    cwd = await api.resolveProjectPath(props.project.path, cwd);
   }
   emit('clear-logs');
   try {
@@ -371,9 +353,7 @@ async function removePipeline(p: Pipeline) {
           <div class="field">
             <label>Shell</label>
             <select v-model="adhoc.shell" class="select">
-              <option value="powershell">PowerShell</option>
-              <option value="cmd">CMD</option>
-              <option value="bash">Git Bash</option>
+              <option v-for="opt in shellOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
             </select>
           </div>
           <div class="field">
@@ -417,9 +397,7 @@ async function removePipeline(p: Pipeline) {
           <div class="field">
             <label>Shell</label>
             <select v-model="form.shell" class="select">
-              <option value="powershell">PowerShell</option>
-              <option value="cmd">CMD</option>
-              <option value="bash">Git Bash</option>
+              <option v-for="opt in shellOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
             </select>
           </div>
         </div>

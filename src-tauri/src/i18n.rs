@@ -42,9 +42,16 @@ pub fn trf(language: &str, key: &str, vars: &[(&str, &str)]) -> String {
 
 /// 英文词条表。由批量提取脚本填充，未翻译的条目会回退中文原文。
 static EN: &[(&str, &str)] = &[
+    // Shell 选项标签（专有名词，英文基本同形，仍走字典便于统一改文案）
+    ("PowerShell", "PowerShell"),
+    ("CMD", "CMD"),
+    ("Git Bash", "Git Bash"),
+    ("Shell (sh)", "Shell (sh)"),
     ("项目路径为空", "Project path is empty"),
     ("目录不存在: {path}", "Folder not found: {path}"),
     ("打开目录失败: {error}", "Failed to open folder: {error}"),
+    ("只支持 http/https 链接", "Only http/https links are supported"),
+    ("打开链接失败: {error}", "Failed to open link: {error}"),
     ("Python 解释器路径（全局生效）", "Python interpreter path (applies globally)"),
     ("Python 路径已保存", "Python path saved"),
     ("RunHelp · 执行完成", "RunHelp · Execution complete"),
@@ -376,4 +383,27 @@ static EN: &[(&str, &str)] = &[
     ("预设名称", "Preset name"),
     ("预设已保存", "Preset saved"),
     ("默认 Shell", "Default Shell"),
+    ("地址解析失败", "Address resolution failed"),
+    ("同步服务未就绪", "Sync service not ready"),
+    ("数据库未就绪", "Database not ready"),
+    ("对方拒绝了本次传输", "Peer rejected this transfer"),
+    ("没有可发送的文件", "No files to send"),
+    ("目标不是 RunHelp 设备或端口不可达", "Target is not a RunHelp device or port unreachable"),
+    ("设备名不能为空", "Device name cannot be empty"),
+    ("请求已超时", "Request timed out"),
+    ("配对码错误", "Wrong pair code"),
+    ("传输失败: {error}", "Transfer failed: {error}"),
+    ("启动传输服务线程失败: {error}", "Failed to start transfer service thread: {error}"),
+    ("启动发现线程失败: {error}", "Failed to start discovery thread: {error}"),
+    ("开启 UDP 广播失败: {error}", "Failed to enable UDP broadcast: {error}"),
+    ("绑定传输端口 {port} 失败: {error}", "Failed to bind transfer port {port}: {error}"),
+    ("绑定发现端口 {port} 失败: {error}", "Failed to bind discovery port {port}: {error}"),
+    ("设置接收超时失败: {error}", "Failed to set receive timeout: {error}"),
+    ("读取 {name} 失败: {error}", "Failed to read {name}: {error}"),
+    ("连接失败: {error}", "Connection failed: {error}"),
+
+    ("对方尚未信任本机，请先在对方设备确认配对", "Peer has not trusted this device yet; confirm pairing on the peer"),
+    ("设备身份已重置，请重启应用后重新配对", "Device identity reset. Restart the app and pair again"),
+    ("指纹不匹配", "Fingerprint mismatch"),
+
 ];

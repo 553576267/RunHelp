@@ -4,13 +4,14 @@ import { api } from '../lib/api';
 import { t } from '../lib/i18n';
 import type { Project } from '../types';
 
-defineProps<{ projects: Project[]; selected: Project | null }>();
+defineProps<{ projects: Project[]; selected: Project | null; syncActive?: boolean }>();
 const emit = defineEmits<{
   (e: 'select', p: Project): void;
   (e: 'created', p: Project): void;
   (e: 'deleted', id: number): void;
   (e: 'updated', p: Project): void;
   (e: 'restored'): void;
+  (e: 'toggle-sync'): void;
 }>();
 
 const notify = inject<(m: string) => void>('notify', () => {});
@@ -145,7 +146,7 @@ async function emptyRecycle() {
         v-for="p in projects"
         :key="p.id"
         class="project-item"
-        :class="{ active: selected?.id === p.id }"
+        :class="{ active: !syncActive && selected?.id === p.id }"
         @click="emit('select', p)"
       >
         <span class="item-icon" :class="p.type">{{ p.type === 'image' ? '▣' : '▸' }}</span>
@@ -162,6 +163,9 @@ async function emptyRecycle() {
       <button class="recycle-btn" @click="openRecycle">
         <span>♲</span> {{ t('回收站') }}
         <span v-if="deleted.length" class="badge">{{ deleted.length }}</span>
+      </button>
+      <button class="recycle-btn sync-btn" :class="{ active: syncActive }" @click="emit('toggle-sync')">
+        <span>⇄</span> {{ t('数据同步') }}
       </button>
     </div>
 
@@ -268,13 +272,15 @@ async function emptyRecycle() {
 }
 .add-btn:hover { color: var(--accent); border-color: var(--accent); }
 .hint { font-size: 11px; margin-top: 5px; display: block; }
-.sidebar-foot { flex-shrink: 0; padding: 8px 10px 12px; border-top: 1px solid var(--border-soft); }
+.sidebar-foot { flex-shrink: 0; padding: 8px 10px 12px; border-top: 1px solid var(--border-soft); display: flex; gap: 8px; }
 .recycle-btn {
-  width: 100%; height: 32px; display: flex; align-items: center; justify-content: center; gap: 7px;
+  flex: 1; min-width: 0; height: 32px; display: flex; align-items: center; justify-content: center; gap: 6px;
   border: 1px solid var(--border); background: var(--bg-2); color: var(--text-1);
-  border-radius: 7px; cursor: pointer; font-size: 12px;
+  border-radius: 7px; cursor: pointer; font-size: 12px; white-space: nowrap;
 }
 .recycle-btn:hover { color: var(--accent); border-color: var(--accent); }
+.sync-btn:hover { color: var(--success); border-color: var(--success); }
+.sync-btn.active { color: var(--success); border-color: var(--success); background: var(--bg-3); }
 .badge { background: var(--accent); color: #fff; border-radius: 9px; padding: 1px 6px; font-size: 10px; }
 .recycle-modal { width: 560px; }
 .section-head { display: flex; justify-content: space-between; align-items: center; }

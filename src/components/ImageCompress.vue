@@ -73,8 +73,35 @@ function dirName(p: string) {
 const running = ref(false);
 const currentRun = ref('');
 const progress = ref({ current: 0, total: 0, percent: 0 });
-const results = ref<{ ok: boolean; input: string; output: string; before: number; after: number }[]>([]);
+type ResultRow = { ok: boolean; input: string; output: string; before: number; after: number; skipped?: boolean };
+const results = ref<ResultRow[]>([]);
 const summary = ref<{ total: number; ok: number; failed: number; before: number; after: number } | null>(null);
+
+// 后端在 runCompression 的 IPC 返回 run_id 之前就可能开始推日志，
+// 这段时间的事件先按 run_id 暂存，拿到 id 后补放，避免前几条记录丢失。
+const pendingLogs = new Map<string, LogEvent[]>();
+function handleCompressLog(e: LogEvent) {
+  try {
+    const data = JSON.parse(e.line);
+    if (data.type === 'progress') {
+      progress.value = {
+        current: data.current,
+        total: data.total,
+        percent: data.total ? Math.round((data.current / data.total) * 100) : 0,
+      };
+      running.value = data.current < data.total;
+    } else if (data.type === 'result') {
+      results.value.push(data);
+    } else if (data.type === 'summary') {
+      summary.value = data;
+      running.value = false;
+    } else if (data.type === 'error') {
+      notify(data.message);
+    }
+  } catch {
+    // 非 JSON 行，忽略（完整输出在控制台）
+  }
+}
 
 watch(
   () => props.project?.id,
@@ -86,27 +113,18 @@ let unlisten: (() => void) | null = null;
 
 onMounted(async () => {
   unlisten = await listen<LogEvent>('run://log', (e) => {
-    if (e.payload.run_id !== currentRun.value) return;
-    try {
-      const data = JSON.parse(e.payload.line);
-      if (data.type === 'progress') {
-        progress.value = {
-          current: data.current,
-          total: data.total,
-          percent: data.total ? Math.round((data.current / data.total) * 100) : 0,
-        };
-        running.value = data.current < data.total;
-      } else if (data.type === 'result') {
-        results.value.push(data);
-      } else if (data.type === 'summary') {
-        summary.value = data;
-        running.value = false;
-      } else if (data.type === 'error') {
-        notify(data.message);
+    if (e.payload.run_id !== currentRun.value) {
+      // 只暂存少量近期事件，避免别的任务长时间运行占用内存
+      const list = pendingLogs.get(e.payload.run_id) ?? [];
+      if (list.length < 2000) list.push(e.payload);
+      pendingLogs.set(e.payload.run_id, list);
+      if (pendingLogs.size > 8) {
+        const oldest = pendingLogs.keys().next().value;
+        if (oldest !== undefined) pendingLogs.delete(oldest);
       }
-    } catch {
-      // 非 JSON 行，忽略（完整输出在控制台）
+      return;
     }
+    handleCompressLog(e.payload);
   });
 });
 
@@ -208,6 +226,7 @@ async function start() {
     return;
   }
   await saveProfile();
+  pendingLogs.clear();
   progress.value = { current: 0, total: 0, percent: 0 };
   results.value = [];
   summary.value = null;
@@ -215,6 +234,10 @@ async function start() {
   try {
     const id = await api.runCompression(activeProfile.value!.id, inputPaths.value);
     currentRun.value = id;
+    // 补放 IPC 返回前就已到达的事件，保持原有顺序
+    const buffered = pendingLogs.get(id) ?? [];
+    pendingLogs.delete(id);
+    for (const e of buffered) handleCompressLog(e);
     emit('run', id);
     notify(t('压缩任务已启动'));
   } catch (e) {
@@ -395,10 +418,15 @@ function savedPercent() {
               <div class="metric"><span class="muted">{{ t('失败') }}</span><strong style="color: var(--danger)">{{ summary.failed }}</strong></div>
               <div class="metric"><span class="muted">{{ t('节省空间') }}</span><strong style="color: var(--accent)">{{ savedPercent() }}%</strong></div>
             </div>
+            <div class="result-head muted">
+              <span>{{ t('结果记录') }} {{ results.length }} / {{ progress.total || summary?.total || 0 }}</span>
+              <span>{{ t('按完成顺序完整保留') }}</span>
+            </div>
             <div class="result-list">
-              <div v-for="(r, i) in results.slice(-8)" :key="i" class="result-row">
+              <div v-for="(r, i) in results" :key="i" class="result-row">
                 <span class="mono" :title="r.input">{{ r.input.split(/[\\/]/).pop() }}</span>
-                <span class="muted">{{ fmtSize(r.before) }} → {{ fmtSize(r.after) }}</span>
+                <span v-if="r.skipped" class="muted">{{ t('跳过（小于阈值）') }}</span>
+                <span v-else class="muted">{{ fmtSize(r.before) }} → {{ fmtSize(r.after) }}</span>
               </div>
             </div>
           </div>
@@ -413,12 +441,16 @@ function savedPercent() {
 </template>
 
 <style scoped>
-.page-head { margin-bottom: 18px; }
+/* 占满 workspace 内容区：后续各层才有确定高度，结果列表才能在自身内部滚动。
+   设最小高度防止日志面板展开后工作区过矮，把运行卡片内容挤出卡片外；
+   不足时由外层 workspace 出滚动条，页面自身布局保持不变。 */
+.compress-page { height: 100%; min-height: 620px; display: flex; flex-direction: column; }
+.page-head { margin-bottom: 18px; flex-shrink: 0; }
 .page-head h2 { font-size: 18px; font-weight: 600; }
 .page-head p { font-size: 12px; margin-top: 4px; }
 /* 左右两栏等高拉伸：右侧进度块自动填满，底部与左侧参数预设块对齐 */
-.layout { display: grid; grid-template-columns: 380px minmax(0, 1fr); gap: 14px; align-items: stretch; }
-.left { padding: 16px; }
+.layout { display: grid; grid-template-columns: 380px minmax(0, 1fr); gap: 14px; align-items: stretch; flex: 1; min-height: 0; }
+.left { padding: 16px; min-height: 0; overflow: auto; }
 .hint { font-size: 11px; margin-top: 5px; display: block; }
 .section-title { font-size: 12px; color: var(--text-1); font-weight: 600; margin-bottom: 10px; }
 .profile-row { display: flex; gap: 8px; }
@@ -426,8 +458,8 @@ function savedPercent() {
 .checks label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 .checks input { accent-color: var(--accent); }
 .profile-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border-soft); }
-.right { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
-.input-card { padding: 16px; }
+.right { display: flex; flex-direction: column; gap: 14px; min-width: 0; min-height: 0; }
+.input-card { padding: 16px; flex-shrink: 0; }
 .fav-row { display: flex; align-items: flex-start; gap: 10px; margin-top: 12px; }
 .fav-label { flex-shrink: 0; font-size: 11px; color: var(--text-2); padding-top: 6px; white-space: nowrap; }
 .fav-chips { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; min-width: 0; max-height: 54px; overflow: auto; }
@@ -450,7 +482,11 @@ function savedPercent() {
 .icon-sm { border: none; background: transparent; color: var(--text-2); cursor: pointer; font-size: 15px; }
 .icon-sm:hover { color: var(--danger); }
 .empty-path { padding: 12px; text-align: center; font-size: 12px; }
+/* 保底高度：标题/进度/汇总/结果头这些固定块加起来约 210px，
+   再给结果列表留几行，避免任何情况下溢出卡片边界 */
 .run-card { padding: 16px; flex: 1; min-height: 260px; display: flex; flex-direction: column; }
+/* 除结果列表外的固定块不参与压缩，避免空间不足时标题/汇总被挤变形 */
+.run-card > :not(.result-list) { flex-shrink: 0; }
 .run-head { display: flex; justify-content: space-between; align-items: center; }
 .run-head .section-title { margin: 0; }
 .progress-bar { height: 8px; background: var(--bg-3); border-radius: 5px; overflow: hidden; margin-top: 16px; }
@@ -460,8 +496,9 @@ function savedPercent() {
 .metric { background: var(--bg-2); border-radius: 7px; padding: 10px; display: flex; flex-direction: column; gap: 4px; }
 .metric span { font-size: 11px; }
 .metric strong { font-size: 18px; font-weight: 600; }
-/* 结果列表吃掉剩余高度：窗口越高可见越多，底边与左侧预设块对齐 */
-.result-list { margin-top: 14px; flex: 1; min-height: 120px; overflow: auto; }
+.result-head { display: flex; justify-content: space-between; gap: 12px; font-size: 11px; margin-top: 12px; }
+/* 结果列表吃掉剩余高度并在自身内部滚动：min-height:0 是关键，否则 flex 子项拒绝收缩，整页被撑高 */
+.result-list { margin-top: 6px; flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; }
 .result-row { display: flex; justify-content: space-between; gap: 12px; padding: 7px 2px; border-bottom: 1px solid var(--border-soft); font-size: 12px; }
 .result-row span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
