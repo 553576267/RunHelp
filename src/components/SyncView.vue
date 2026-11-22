@@ -413,9 +413,23 @@ async function pickFiles(folder: boolean) {
   try {
     const result = await open({ directory: folder, multiple: true, title: folder ? t('选择文件夹') : t('选择文件') });
     if (!result) return;
-    const paths = (Array.isArray(result) ? result : [result]).filter((p): p is string => typeof p === 'string');
+    let paths = (Array.isArray(result) ? result : [result]).filter((p): p is string => typeof p === 'string');
     if (!paths.length) return;
-    const items = paths.map((p) => ({ name: basename(p), size: 0 }));
+
+    // Android 的文件选择器返回 content:// URI，Rust 端无法按绝对路径读取。
+    // 先让原生插件把 URI 内容复制到应用私有目录，改用真实路径发送。
+    let displayNames: string[] | null = null;
+    if (paths.some((p) => p.startsWith('content://'))) {
+      if (folder) {
+        notify(t('安卓暂不支持发送整个文件夹，请选择文件'));
+        return;
+      }
+      const resolved = await api.mobileResolveUris(paths);
+      if (!resolved.length) return;
+      paths = resolved.map((r) => r.path);
+      displayNames = resolved.map((r) => r.name);
+    }
+    const items = paths.map((p, i) => ({ name: displayNames?.[i] ?? basename(p), size: 0 }));
     const transferId = newTransferId();
     sendModal.value = {
       transferId,

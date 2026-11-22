@@ -134,13 +134,32 @@ pub fn emit_request(
     if let Some(app) = AppState::app_handle_for_sync() {
         // 收到请求时把窗口拉到桌面前端（show + 取消最小化 + 置焦），
         // 避免用户在别的窗口错过确认；Windows 前台抢占有系统限制，尽力而为。
+        // 移动端没有 WebviewWindow 概念，跳过置前，仅靠事件 + 系统通知提醒。
         let focus = focus_on_request_enabled();
+        #[cfg(desktop)]
         if focus {
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.show();
                 let _ = win.unminimize();
                 let _ = win.set_focus();
             }
+        }
+        // 移动端无桌面窗口置前概念：发系统通知提醒用户，点击通知会唤起 App，
+        // SyncView 挂载后通过 pullPending 补弹窗确认。
+        #[cfg(target_os = "android")]
+        if focus {
+            use tauri_plugin_notification::NotificationExt;
+            let body = if count > 1 {
+                format!("{} 向你发送了 {} 个文件", from, count)
+            } else {
+                format!("{} 向你发送了 {}", from, name)
+            };
+            let _ = app
+                .notification()
+                .builder()
+                .title("RunHelp 收到传输请求")
+                .body(body)
+                .show();
         }
         let item_values: Vec<_> = items
             .iter()
@@ -245,6 +264,9 @@ pub fn sync_start(app: tauri::AppHandle) -> Result<(), String> {
         runtime.identity.fingerprint.clone(),
     )?;
     runtime.started.store(true, Ordering::SeqCst);
+    // 移动端启动前台服务 + WakeLock，避免锁屏/切后台后 UDP 发现与 TCP 监听被冻结。
+    // 桌面端是空实现，无副作用。
+    let _ = crate::mobile::mobile_start_keepalive(app.clone());
     Ok(())
 }
 
@@ -255,6 +277,8 @@ pub fn sync_stop(app: tauri::AppHandle) -> Result<(), String> {
     runtime.discovery_stop.store(true, Ordering::SeqCst);
     runtime.server_stop.store(true, Ordering::SeqCst);
     runtime.started.store(false, Ordering::SeqCst);
+    // 移动端释放前台服务与锁；桌面端空实现。
+    let _ = crate::mobile::mobile_stop_keepalive(app.clone());
     Ok(())
 }
 

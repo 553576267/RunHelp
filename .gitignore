@@ -2,7 +2,20 @@
 node_modules/
 dist/
 src-tauri/target/
-src-tauri/gen/
+
+# ============ Tauri Android 源码 ============
+# gen 下只放行 android 源码（Manifest/Kotlin/gradle/资源/wrapper），
+# 排除 Gradle/Rust 构建产物与本机缓存。clone 后仍需 tauri android init 补齐骨架，
+# 但自定义插件（后台保活/URI 适配）与权限改动会保留。
+src-tauri/gen/*
+!src-tauri/gen/android/
+src-tauri/gen/android/build/
+src-tauri/gen/android/.gradle/
+src-tauri/gen/android/.kotlin/
+src-tauri/gen/android/.tauri/
+src-tauri/gen/android/local.properties
+src-tauri/gen/android/app/build/
+src-tauri/gen/android/app/src/main/jniLibs/
 
 # ============ 数据库与备份（含用户数据的文件绝不入库） ============
 *.db

@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod db;
 pub mod i18n;
+pub mod mobile;
 pub mod models;
 pub mod platform;
 pub mod process;
@@ -9,12 +10,22 @@ pub mod sync;
 
 use tauri::{Manager, RunEvent};
 
+// 供前端判断当前平台：移动端只渲染数据同步页，桌面端渲染完整工作台。
+// 用编译期 cfg 判定，比运行时 UA 判断可靠且零额外依赖。
+#[tauri::command]
+fn app_is_mobile() -> bool {
+    cfg!(mobile)
+}
+
+// 移动端（Android/iOS）需要此宏生成 JNI/AppDelegate 入口；桌面端无副作用。
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 刷新 PATH 环境快照（Windows GUI 启动的已知问题，实现见 platform 层）
     platform::refresh_path_env();
 
     // 单实例插件必须是第一个注册的插件：重复双击图标时不再新开进程，
     // 而是把已经运行的窗口显示 / 取消最小化 / 置前。
+    #[allow(unused_mut)] // 仅桌面端会重新赋值（单实例插件）
     let mut builder = tauri::Builder::default();
     #[cfg(desktop)]
     {
@@ -27,14 +38,22 @@ pub fn run() {
         }));
     }
 
-    builder
+    #[allow(unused_mut)] // 仅桌面端会重新赋值（window-state 插件）
+    let mut builder = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        // 记住窗口大小/位置/最大化状态，下次启动自动恢复（默认存到 AppData/Roaming/...）。
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // 移动端原生桥（前台保活 / URI 适配）；桌面端插件仅注册空壳 command。
+        .plugin(mobile::init());
+    // 记住窗口大小/位置/最大化状态（仅桌面端有窗口概念；window-state 插件在移动端不可用）。
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_window_state::Builder::default().build());
+    }
+
+    builder
         .setup(|app| {
             let data_dir = app
                 .path()
@@ -77,6 +96,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            app_is_mobile,
+            mobile::mobile_start_keepalive,
+            mobile::mobile_stop_keepalive,
+            mobile::mobile_resolve_uris,
             commands::project::list_projects,
             commands::project::resolve_project_path,
             commands::project::open_folder,
