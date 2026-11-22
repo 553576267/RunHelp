@@ -221,6 +221,8 @@ onMounted(async () => {
     })
   );
   await load();
+  // 挂载兜底：若此前因请求自动切页进来、事件在挂载前已发出，主动拉一次并补弹确认框
+  void pullPending(true);
   // 自动刷新在后台静默进行，不体现任何加载状态、不干扰手动刷新按钮。
   autoTimer = window.setInterval(() => { void doRefreshDevices(false); }, 5000);
 });
@@ -245,15 +247,21 @@ function refreshDevices() {
   triggerAction('refresh-devices', () => { void doRefreshDevices(true); });
 }
 
-async function pullPending() {
+async function pullPending(prompt = false) {
   try {
     const pending = await api.syncListPending();
     if (!pending.length) return;
     const req = pending[pending.length - 1];
-    // 接收请求靠事件实时推送；刷新用于兜底：只要出现新的待确认请求就切换到最新一条，
+    // 接收请求靠事件实时推送；刷新/挂载用于兜底：只要出现新的待确认请求就切换到最新一条，
     // 即使当前显示的是已拒绝/已完成的历史任务。
     if (!activeReceive.value || activeReceive.value.id !== req.id) {
       activeReceive.value = buildReceiveTask(req);
+      // 自动切页进来时，事件可能在本组件挂载前就发出了；这里补弹确认框，
+      // 与 sync://request 监听保持一致（未信任先核指纹，已信任直接弹摘要）。
+      if (prompt) {
+        if (!req.trusted) fpDialog.value = req;
+        else requestDialog.value = req;
+      }
     }
   } catch (e) {
     notify(String(e));
@@ -882,8 +890,9 @@ function stageLabel(modal: SendModal) {
 .entry-icon { width: 20px; height: 20px; flex-shrink: 0; }
 .entry-badge { position: absolute; top: 6px; right: 10px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--danger); color: #fff; font-size: 10px; line-height: 16px; }
 
-/* 内容区自适应剩余高度；三个视图共用这一层，保证等高。内部各列表各自滚动 */
-.view-body { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+/* 内容区优先吃满剩余高度；日志面板展开导致空间不足时，保留可读的最小高度，
+   超出部分由 .sync-page 自身出页面级滚动条（不是把卡片压扁，也不是 workspace 外层滚动） */
+.view-body { flex: 1; min-height: 300px; display: flex; overflow: hidden; }
 .send-layout { flex: 1; min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
 .card.pad { padding: 16px; }
 .device-panel, .compose-panel, .receive-panel { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
@@ -952,7 +961,7 @@ function stageLabel(modal: SendModal) {
 .receive-task.rejected { opacity: .6; }
 .request-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 12px; flex-shrink: 0; }
 
-.settings-grid { flex: 1; min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
+.settings-grid { flex: 1; min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; overflow-y: auto; }
 .fingerprint-box { padding: 10px 12px; border: 1px solid var(--accent); border-radius: 8px; background: var(--bg-2); color: var(--accent); font-size: 15px; letter-spacing: 2px; }
 .btn.danger { color: var(--danger); border-color: var(--danger); }
 

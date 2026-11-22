@@ -182,6 +182,8 @@ export interface SyncRequestEvent {
   size: number;
   count: number;
   items: SyncRequestItem[];
+  /** 后端是否已按设置把窗口置前；前端据此决定是否自动切到同步页 */
+  focus?: boolean;
 }
 
 export interface SyncReceivedEvent {

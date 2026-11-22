@@ -27,6 +27,8 @@ onMounted(async () => {
 
 async function load() {
   settings.value = await api.getSettings();
+  // 存量库可能没有这个新键，前端兜个默认值，避免下拉框空白
+  if (!settings.value.sync_focus_on_request) settings.value.sync_focus_on_request = '1';
   shellOptions.value = await api.getShellOptions();
   // 存量 default_shell 在当前平台不可用时，界面显示平台默认值
   const shell = settings.value.default_shell;
@@ -220,6 +222,17 @@ async function pickPython() {
           <button class="btn" @click="saveSetting('notify_on_success')">{{ t('保存') }}</button>
         </div>
         <span class="muted hint">{{ t('命令或流水线成功结束后，若窗口不在前台，会在桌面右下角提示；失败和手动停止不弹。') }}</span>
+      </div>
+      <div class="field" style="margin-top: 16px">
+        <label>{{ t('收到传输请求时置前窗口') }}</label>
+        <div class="row">
+          <select v-model="settings.sync_focus_on_request" class="select">
+            <option value="1">{{ t('开启（并自动切到数据同步页）') }}</option>
+            <option value="0">{{ t('关闭（不打扰当前窗口）') }}</option>
+          </select>
+          <button class="btn" @click="saveSetting('sync_focus_on_request')">{{ t('保存') }}</button>
+        </div>
+        <span class="muted hint">{{ t('有人向本机发送文件或文字时，把窗口显示到桌面前端并弹出确认框；Windows 可能限制后台窗口抢占前台。') }}</span>
       </div>
     </div>
 

@@ -103,6 +103,21 @@ pub fn trust_fingerprint(fp: &str, device_id: &str, name: &str) {
     }
 }
 
+/// 收到传输请求时是否把窗口显示到前台（设置开关，默认开启）。
+fn focus_on_request_enabled() -> bool {
+    AppState::open_db_for_sync()
+        .and_then(|c| {
+            c.query_row(
+                "SELECT value FROM settings WHERE key='sync_focus_on_request'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+        })
+        .map(|v| v != "0")
+        .unwrap_or(true)
+}
+
 pub fn emit_request(
     id: &str,
     transfer_id: &str,
@@ -117,6 +132,16 @@ pub fn emit_request(
     items: &[super::PendingItem],
 ) {
     if let Some(app) = AppState::app_handle_for_sync() {
+        // 收到请求时把窗口拉到桌面前端（show + 取消最小化 + 置焦），
+        // 避免用户在别的窗口错过确认；Windows 前台抢占有系统限制，尽力而为。
+        let focus = focus_on_request_enabled();
+        if focus {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+            }
+        }
         let item_values: Vec<_> = items
             .iter()
             .map(|i| serde_json::json!({ "name": i.name, "size": i.size }))
@@ -135,6 +160,7 @@ pub fn emit_request(
                 "size": size,
                 "count": count,
                 "items": item_values,
+                "focus": focus,
             }),
         );
     }

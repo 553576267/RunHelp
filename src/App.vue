@@ -5,7 +5,7 @@ import { getVersion } from '@tauri-apps/api/app';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { api } from './lib/api';
 import { t, setLocale } from './lib/i18n';
-import type { Project, LogEvent, RunEndEvent, RunHistory } from './types';
+import type { Project, LogEvent, RunEndEvent, RunHistory, SyncRequestEvent } from './types';
 import ProjectSidebar from './components/ProjectSidebar.vue';
 import CommandCenter from './components/CommandCenter.vue';
 import ImageCompress from './components/ImageCompress.vue';
@@ -16,8 +16,7 @@ const projects = ref<Project[]>([]);
 const selected = ref<Project | null>(null);
 type MainTab = 'commands' | 'compress' | 'settings' | 'tasks' | 'sync';
 const tab = ref<MainTab>('commands');
-// 左下角「数据同步」按常驻项目处理：选中时页签栏只留同步 + 全局任务，点真实项目即退出
-const syncMode = ref(false);
+// 数据同步与全局设置一样是「页面级入口」：只切换内容区，不参与页签栏
 const logs = ref<LogEvent[]>([]);
 const activeRunId = ref<string>('');
 const toast = ref('');
@@ -112,7 +111,6 @@ const UI_STATE_KEY = 'runhelp.ui.state';
 interface UiState {
   selectedId: number | null;
   tab: MainTab;
-  syncMode?: boolean;
   consoleCollapsed?: boolean;
   consoleSize?: ConsoleSize;
   consoleCustomHeight?: number | null;
@@ -122,7 +120,6 @@ function saveUiState() {
     const state: UiState = {
       selectedId: selected.value?.id ?? null,
       tab: tab.value,
-      syncMode: syncMode.value,
       consoleCollapsed: consoleCollapsed.value,
       consoleSize: consoleSize.value,
       consoleCustomHeight: consoleCustomHeight.value,
@@ -145,7 +142,6 @@ const initialUiState = readUiState();
 let uiStateApplied = false;
 // 立即恢复日志面板状态，避免首屏闪烁
 if (initialUiState) {
-  if (typeof initialUiState.syncMode === 'boolean') syncMode.value = initialUiState.syncMode;
   if (typeof initialUiState.consoleCollapsed === 'boolean') consoleCollapsed.value = initialUiState.consoleCollapsed;
   if (initialUiState.consoleSize) consoleSize.value = initialUiState.consoleSize;
   if (typeof initialUiState.consoleCustomHeight === 'number') consoleCustomHeight.value = initialUiState.consoleCustomHeight;
@@ -203,44 +199,34 @@ function firstProjectTab(p: Project | null): MainTab {
   return p.type === 'image' ? 'compress' : 'commands';
 }
 
-// 当前可用的页签（全局设置已移到右上角按钮，这里只留全局任务）
+// 页签栏始终只有两个：当前项目的类型页签 + 常驻的全局任务。
+// 数据同步与全局设置同属页面级入口，不出现在页签栏，也不改变页签栏的显示。
 const availableTabs = computed<{ key: MainTab; label: string }[]>(() => {
   const tasksTab: { key: MainTab; label: string } = { key: 'tasks', label: t('全局任务') };
-  const syncTab: { key: MainTab; label: string } = { key: 'sync', label: t('数据同步') };
-  // 同步常驻项目：同步页置顶，隐藏命令中心/图片压缩等项目页签，仅保留全局任务
-  if (syncMode.value) return [syncTab, tasksTab];
   const p = selected.value;
-  if (!p) return [tasksTab, syncTab];
+  if (!p) return [tasksTab];
   if (p.type === 'image') {
-    return [{ key: 'compress', label: t('图片压缩') }, tasksTab, syncTab];
+    return [{ key: 'compress', label: t('图片压缩') }, tasksTab];
   }
-  return [{ key: 'commands', label: t('命令中心') }, tasksTab, syncTab];
+  return [{ key: 'commands', label: t('命令中心') }, tasksTab];
 });
 
-// 全局设置虽不在页签栏，但仍是合法页签（由右上角按钮进入），需参与校验与持久化
+// 同步、设置虽不在页签栏，但都是合法页面（由右上角按钮进入），需参与校验与持久化
 function isTabAvailable(key: MainTab): boolean {
-  return key === 'settings' || availableTabs.value.some((t) => t.key === key);
+  return key === 'settings' || key === 'sync' || availableTabs.value.some((t) => t.key === key);
 }
 
-// 侧边栏「数据同步」按钮：toggle。进入即视作选中常驻项目，再点回到普通项目的默认页。
+// 右上角「数据同步」按钮：与全局设置一样只切换内容区；再点一次回到项目默认页
 function toggleSync() {
-  if (syncMode.value) {
-    syncMode.value = false;
-    tab.value = firstProjectTab(selected.value);
-  } else {
-    syncMode.value = true;
-    tab.value = 'sync';
-  }
-  saveUiState();
+  tab.value = tab.value === 'sync' ? firstProjectTab(selected.value) : 'sync';
 }
 
-// 项目类型变化时，若当前页签不可用则自动切到第一个（同步常驻视图不受影响）
+// 项目类型变化时，若当前页签不可用则自动切到第一个（同步/设置页面不算失效，保持显示）
 watch(
   () => selected.value?.type,
   () => {
-    if (syncMode.value) return;
     if (!isTabAvailable(tab.value)) {
-      tab.value = availableTabs.value[0]?.key ?? 'settings';
+      tab.value = availableTabs.value[0]?.key ?? 'tasks';
     }
   },
   { immediate: true }
@@ -258,9 +244,8 @@ watch(tab, (t) => {
 // 切换项目时持久化选中项
 watch(() => selected.value?.id, () => saveUiState());
 
-// 点击项目：退出同步常驻视图，切到该项目可用的第一个页签
+// 点击项目：切到该项目可用的第一个页签（自然退出同步/设置页面）
 function selectProject(p: Project) {
-  syncMode.value = false;
   selected.value = p;
   tab.value = firstProjectTab(p);
 }
@@ -320,28 +305,26 @@ async function loadProjects() {
   } else if (!selected.value && projects.value.length) {
     selected.value = projects.value[0];
   }
-  // 恢复页签；失效时按当前项目回退到第一个可用页签
+  // 恢复页签：sync/settings 是合法页面但不在页签栏，仍可恢复；其余失效时回退到项目默认页
   if (saved?.tab && isTabAvailable(saved.tab)) {
     tab.value = saved.tab;
-    // 兼容旧状态：页签是同步但没有 syncMode 字段时，仍视为同步常驻视图
-    if (saved.tab === 'sync') syncMode.value = true;
   } else {
-    // 同步模式会跳过项目类型 watch，这里兜底回退到当前模式的第一个页签
-    tab.value = availableTabs.value[0]?.key ?? 'settings';
+    tab.value = availableTabs.value[0]?.key ?? 'tasks';
   }
 }
 
 function onProjectCreated(p: Project) {
   projects.value.unshift(p);
   selected.value = p;
+  tab.value = firstProjectTab(p);
 }
 
 function onProjectDeleted(id: number) {
   projects.value = projects.value.filter((p) => p.id !== id);
   if (selected.value?.id === id) {
     selected.value = projects.value[0] ?? null;
-    // 同步是常驻视图，项目被删光时也不把它顶掉
-    if (!selected.value && !syncMode.value) tab.value = 'settings';
+    // 项目删光时：同步/设置作为独立页面保留；否则回退到设置页
+    if (!selected.value && tab.value !== 'sync' && tab.value !== 'settings') tab.value = 'settings';
   }
 }
 
@@ -565,6 +548,13 @@ onMounted(async () => {
     handleRunEnd(e.payload);
     loadRunning();
   });
+  // 收到传输请求：后端已按设置置前窗口，这里自动切到同步页，让确认弹窗立刻可见。
+  // 开关关闭时后端 focus=false，不打扰用户当前所在页面。
+  await listen<SyncRequestEvent>('sync://request', (e) => {
+    if (e.payload.focus !== false && tab.value !== 'sync') {
+      tab.value = 'sync';
+    }
+  });
   const settings = await api.getSettings();
   setLocale(settings.language);
   const theme = settings.theme ?? 'dark';
@@ -604,13 +594,11 @@ onUnmounted(() => {
       <ProjectSidebar
         :projects="projects"
         :selected="selected"
-        :sync-active="syncMode"
         @created="onProjectCreated"
         @deleted="onProjectDeleted"
         @updated="onProjectUpdated"
         @restored="onProjectRestored"
         @select="selectProject"
-        @toggle-sync="toggleSync"
       />
     </aside>
 
@@ -625,6 +613,17 @@ onUnmounted(() => {
           >{{ t.label }}</button>
         </nav>
         <div class="topbar-right">
+          <!-- 数据同步与全局设置同属页面级入口，固定在右上角：只切内容区，不参与页签切换 -->
+          <button
+            class="btn top-action sync-top-btn"
+            :class="{ active: tab === 'sync' }"
+            :title="t('数据同步')"
+            @click="toggleSync"
+          >
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21.5 2.5 10.8 13.2" /><path d="M21.5 2.5 15 21l-4.2-7.8L3 9l18.5-6.5Z" />
+            </svg> {{ t('数据同步') }}
+          </button>
           <button
             class="btn settings-btn"
             :class="{ active: tab === 'settings' }"
@@ -845,9 +844,11 @@ onUnmounted(() => {
   content: ''; position: absolute; left: 14px; right: 14px; bottom: 0;
   height: 2px; background: var(--accent); border-radius: 2px 2px 0 0;
 }
-.topbar-right { font-size: 12px; display: flex; align-items: center; gap: 12px; }
-.settings-btn { gap: 7px; }
+.topbar-right { font-size: 12px; display: flex; align-items: center; gap: 10px; }
+.topbar-right .btn { display: inline-flex; align-items: center; gap: 7px; }
 .settings-btn.active { border-color: var(--accent); color: var(--accent); }
+/* 同步页面沿用青绿色选中态，与设置页的主色区分，便于一眼识别当前所在页面 */
+.sync-top-btn.active { border-color: var(--success); color: var(--success); }
 .content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .workspace { flex: 1; min-height: 0; overflow: auto; padding: 20px 22px; }
 .console {
