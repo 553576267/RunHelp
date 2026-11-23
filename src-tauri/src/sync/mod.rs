@@ -27,6 +27,9 @@ pub const TRANSFER_PORT: u16 = 47801;
 pub const DISCOVERY_MAGIC: &str = "RUNHELP1";
 /// 设备多久没广播就判定离线（秒）。每秒广播一次，5 秒约等于连续丢 5 包，兼顾灵敏与抗抖动。
 pub const DEVICE_TIMEOUT_SECS: i64 = 5;
+/// 仅靠网段探测发现的设备没有广播心跳，扫描周期 15 秒，离线超时需大于周期避免闪断。
+pub const PROBE_DEVICE_TIMEOUT_SECS: i64 = 45;
+
 /// 接收确认超时（秒）：超时未点则自动拒绝，避免 HTTP 线程永久挂起。
 /// 用户反馈 90 秒偏短，这里放宽到 5 分钟；取消发送会立即解除等待。
 pub const REQUEST_TIMEOUT_SECS: u64 = 300;
@@ -57,6 +60,18 @@ pub struct DeviceInfo {
     pub online: bool,
     /// 是否仅靠网段探测发现（无广播心跳，需更长的离线超时）
     pub probe_only: bool,
+}
+
+impl DeviceInfo {
+    /// 在线判定：广播设备 5 秒；仅探测设备 45 秒（扫描周期 15 秒 + 余量）。
+    pub fn is_online(&self, now: i64) -> bool {
+        let timeout = if self.probe_only {
+            PROBE_DEVICE_TIMEOUT_SECS
+        } else {
+            DEVICE_TIMEOUT_SECS
+        };
+        now - self.last_seen < timeout
+    }
 }
 
 /// 待接收清单中的单项（文件/文字）

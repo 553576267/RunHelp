@@ -136,6 +136,7 @@ export const api = {
     call<import('../types').SyncTransfer[]>('sync_list_history', { limit }),
   syncClearHistory: () => call<void>('sync_clear_history'),
   syncRegenerateIdentity: () => call<string>('sync_regenerate_identity'),
+  appIsMobile: () => call<boolean>('app_is_mobile'),
   // 移动端把 content:// URI 解析为可读文件路径；桌面端原样返回。
   mobileResolveUris: (uris: string[]) =>
     call<{ path: string; name: string }[]>('mobile_resolve_uris', { uris }),

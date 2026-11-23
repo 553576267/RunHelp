@@ -808,7 +808,12 @@ fn http_exchange_body(
         };
         Err(msg.to_string())
     } else {
-        Err(format!("传输失败: {}", status))
+        let detail = if response_body.is_empty() {
+            String::new()
+        } else {
+            format!(" - {}", response_body)
+        };
+        Err(format!("传输失败: {}{}", status, detail))
     }
 }
 

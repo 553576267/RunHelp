@@ -57,6 +57,8 @@ const pairIp = ref('');
 const editingName = ref(false);
 const nameDraft = ref('');
 const busy = ref(false);
+const isMobile = ref(false);
+
 const activeAction = ref('');
 // 刷新按钮统一交互：冷却 600ms、图标原地旋转、期间重复点击忽略、不显示"已刷新"字样。
 // 全平台规则由 useActionFeedback 统一定义；自动刷新不走这里，只在附近设备列表显示加载图标。
@@ -221,6 +223,7 @@ onMounted(async () => {
       if (pendingDecision.value) pendingDecision.value = null;
     })
   );
+  isMobile.value = await api.appIsMobile().catch(() => false);
   await load();
   // 挂载兜底：若此前因请求自动切页进来、事件在挂载前已发出，主动拉一次并补弹确认框
   void pullPending(true);
@@ -812,7 +815,7 @@ function stageLabel(modal: SendModal) {
             <label>{{ t('接收目录') }}</label>
             <div class="row">
               <input :value="status?.receive_dir || ''" class="input mono" readonly />
-              <button class="btn sm" @click="setReceiveDir">{{ t('更改') }}</button>
+              <button v-if="!isMobile" class="btn sm" @click="setReceiveDir">{{ t('更改') }}</button>
             </div>
           </div>
         </div>

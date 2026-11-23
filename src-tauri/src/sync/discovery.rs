@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
-use super::{DeviceInfo, SyncRuntime, DISCOVERY_MAGIC, DISCOVERY_PORT, DEVICE_TIMEOUT_SECS, TRANSFER_PORT};
+use super::{DeviceInfo, SyncRuntime, DISCOVERY_MAGIC, DISCOVERY_PORT, TRANSFER_PORT};
 
 fn hex_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 2);
@@ -156,14 +156,7 @@ pub fn start(
                 // 否则 15 秒扫描间隔设备会「闪一下就消失」。
                 let now = super::now_secs();
                 if let Ok(mut devices) = rt.devices.lock() {
-                    devices.retain(|_, d| {
-                        let timeout = if d.probe_only {
-                            PROBE_DEVICE_TIMEOUT_SECS
-                        } else {
-                            DEVICE_TIMEOUT_SECS
-                        };
-                        now - d.last_seen < timeout
-                    });
+                    devices.retain(|_, d| d.is_online(now));
                 }
             }
             let _ = socket.send_to(bye_packet.as_bytes(), broadcast_addr);
@@ -198,9 +191,6 @@ pub fn upsert_device_probe(
 ) {
     upsert_device_ex(rt, id, name, platform, ip, port, fingerprint, true);
 }
-
-/// 仅靠网段探测发现的设备存活时长（需大于扫描周期 15 秒 + 余量）。
-const PROBE_DEVICE_TIMEOUT_SECS: i64 = 45;
 
 fn upsert_device_ex(
     rt: &SyncRuntime,

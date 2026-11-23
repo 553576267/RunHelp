@@ -26,7 +26,9 @@ pub fn display_name_ro() -> String {
 
 /// 从设置读同步接收目录
 pub fn receive_dir() -> PathBuf {
-    let dir = AppState::open_db_for_sync()
+    // 只接受本地绝对路径；Android 的 content:// URI 或相对路径一律忽略，
+    // 否则 base.join(rel) 会落到不可写位置，接收文件时返回 500。
+    let configured = AppState::open_db_for_sync()
         .as_ref()
         .and_then(|c| {
             c.query_row(
@@ -37,13 +39,26 @@ pub fn receive_dir() -> PathBuf {
             .ok()
         })
         .filter(|s| !s.trim().is_empty())
-        .map(PathBuf::from);
-    dir.unwrap_or_else(|| {
-        let home = std::env::var("USERPROFILE")
-            .or_else(|_| std::env::var("HOME"))
-            .unwrap_or_default();
-        PathBuf::from(home).join("Downloads").join("RunHelp同步")
-    })
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute() && !p.to_string_lossy().starts_with("content://"));
+
+    let dir = configured.unwrap_or_else(|| {
+        #[cfg(target_os = "android")]
+        {
+            // 移动端没有可靠的 HOME/USERPROFILE，使用应用私有可写目录。
+            AppState::app_handle_for_sync()
+                .and_then(|app| app.path().app_data_dir().ok())
+                .map(|p| p.join("sync_receive"))
+                .unwrap_or_else(std::env::temp_dir)
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            crate::platform::home_dir().join("Downloads").join("RunHelp同步")
+        }
+    });
+    // 提前建目录；失败仍返回路径，由 receive_file 把具体 OS 错误透传给发送方。
+    let _ = std::fs::create_dir_all(&dir);
+    dir
 }
 
 pub fn is_trusted_fingerprint(fp: &str) -> bool {
@@ -345,7 +360,7 @@ pub fn sync_list_devices(app: tauri::AppHandle) -> Result<Vec<DeviceInfo>, Strin
         // 实时按最后发现时间重算在线状态：关闭软件（含强杀，来不及发 BYE）后
         // 刷新即可立刻反映离线，不必等后台 discovery 线程的超时清理。
         .map(|mut d| {
-            d.online = now - d.last_seen < super::DEVICE_TIMEOUT_SECS;
+            d.online = d.is_online(now);
             d
         })
         .collect();
