@@ -257,12 +257,14 @@ pub fn sync_start(app: tauri::AppHandle) -> Result<(), String> {
     }
     discovery::start(
         runtime.clone(),
-        device_id,
-        name,
+        device_id.clone(),
+        name.clone(),
         std::env::consts::OS.to_string(),
         super::TRANSFER_PORT,
         runtime.identity.fingerprint.clone(),
     )?;
+    // 网段主动探测：热点/AP 隔离下 UDP 广播不可达时的发现兜底。
+    discovery::start_subnet_scan(runtime.clone(), device_id, name);
     runtime.started.store(true, Ordering::SeqCst);
     // 移动端启动前台服务 + WakeLock，避免锁屏/切后台后 UDP 发现与 TCP 监听被冻结。
     // 桌面端是空实现，无副作用。
@@ -389,7 +391,7 @@ pub fn sync_list_devices(app: tauri::AppHandle) -> Result<Vec<DeviceInfo>, Strin
                         ip: last_ip.clone(), port: super::TRANSFER_PORT,
                         fingerprint: fp, last_seen: 0,
                         trusted: trusted != 0, auto_accept: auto != 0,
-                        favorite: fav != 0, alias, last_ip, online: false,
+                        favorite: fav != 0, alias, last_ip, online: false, probe_only: false,
                     });
                 }
             }
@@ -428,8 +430,15 @@ pub fn sync_list_pending(app: tauri::AppHandle) -> Result<Vec<serde_json::Value>
 #[tauri::command]
 pub fn sync_pair_device(app: tauri::AppHandle, ip: String) -> Result<DeviceInfo, String> {
     let ip = ip.trim().to_string();
-    let identity = rt(&app).identity.clone();
-    let (id, name, fp) = transfer::probe(&ip, super::TRANSFER_PORT, &identity)?;
+    let runtime = rt(&app);
+    let identity = runtime.identity.clone();
+    let (self_id, self_name) = {
+        let conn = AppState::open_db_for_sync();
+        let sid = conn.as_ref().map(|c| super::device_id(c)).unwrap_or_default();
+        let sname = conn.as_ref().map(|c| super::display_name(c)).unwrap_or_default();
+        (sid, sname)
+    };
+    let (id, name, fp) = transfer::probe(&ip, super::TRANSFER_PORT, &identity, &self_id, &self_name)?;
     if id.is_empty() || fp.is_empty() {
         return Err("目标不是 RunHelp 设备或端口不可达".to_string());
     }
@@ -447,8 +456,8 @@ pub fn sync_pair_device(app: tauri::AppHandle, ip: String) -> Result<DeviceInfo,
         alias: String::new(),
         last_ip: ip,
         online: true,
+        probe_only: false,
     };
-    let runtime = rt(&app);
     if let Ok(mut devices) = runtime.devices.lock() {
         devices.insert(id, info.clone());
     }

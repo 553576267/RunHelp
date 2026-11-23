@@ -46,6 +46,7 @@ interface ReceiveTask {
 }
 
 const notify = inject<(m: string) => void>('notify', () => {});
+const confirm = inject<(m: string, o?: { title?: string; danger?: boolean; confirmText?: string }) => Promise<boolean>>('confirm', async () => false);
 
 const view = ref<View>('send');
 const status = ref<SyncStatus | null>(null);
@@ -321,6 +322,22 @@ async function doPair() {
 async function toggleFavorite(device: SyncDevice) {
   try {
     await api.syncSetFavorite(device.fingerprint, !device.favorite);
+    await doRefreshDevices(false);
+  } catch (e) {
+    notify(String(e));
+  }
+}
+
+async function removeDevice(device: SyncDevice) {
+  const ok = await confirm(
+    t('确定删除设备「{name}」？将清除其信任与收藏记录；下次在线需重新确认指纹。', { name: displayName(device) }),
+    { title: t('删除设备'), danger: true, confirmText: t('删除') }
+  );
+  if (!ok) return;
+  try {
+    await api.syncRemoveDevice(device.fingerprint);
+    if (selectedId.value === device.id) selectedId.value = '';
+    notify(t('已移除设备'));
     await doRefreshDevices(false);
   } catch (e) {
     notify(String(e));
@@ -662,6 +679,9 @@ function stageLabel(modal: SendModal) {
                 <button class="tag-link favorite-btn" :class="{ active: d.favorite }" @click.stop="toggleFavorite(d)">
                   {{ d.favorite ? '★' : '☆' }} {{ d.favorite ? t('取消收藏') : t('收藏') }}
                 </button>
+                <button class="tag-link remove-btn" :title="t('删除设备')" @click.stop="removeDevice(d)">
+                  {{ t('移除') }}
+                </button>
               </div>
             </div>
           </div>
@@ -942,6 +962,8 @@ function stageLabel(modal: SendModal) {
 .tag.warn { color: var(--danger); }
 .tag-link { margin-left: auto; font-size: 11px; color: var(--accent); background: transparent; border: none; cursor: pointer; }
 .tag-link.active { color: var(--success); }
+.remove-btn { margin-left: 0; color: var(--muted, #888); }
+.remove-btn:hover { color: #e05555; }
 
 .action-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; justify-items: center; }
 .action-card { width: 100%; height: 82px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-2); color: var(--text-1); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; cursor: pointer; font-size: 12px; }

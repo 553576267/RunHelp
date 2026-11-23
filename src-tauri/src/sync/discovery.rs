@@ -6,12 +6,12 @@
 //! 末尾类型字段为可选（旧版 5 段包按 HELLO 处理），保证混版兼容。
 //! 名称用 hex 编码，避免竖线/换行破坏协议，也天然支持中文。
 
-use std::net::{IpAddr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
-use super::{DeviceInfo, SyncRuntime, DISCOVERY_MAGIC, DISCOVERY_PORT, DEVICE_TIMEOUT_SECS};
+use super::{DeviceInfo, SyncRuntime, DISCOVERY_MAGIC, DISCOVERY_PORT, DEVICE_TIMEOUT_SECS, TRANSFER_PORT};
 
 fn hex_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 2);
@@ -152,10 +152,18 @@ pub fn start(
                     Err(_) => {}
                 }
 
-                // 清理超时设备
+                // 清理超时设备：广播发现的 5 秒；仅靠网段探测发现的给足 45 秒，
+                // 否则 15 秒扫描间隔设备会「闪一下就消失」。
                 let now = super::now_secs();
                 if let Ok(mut devices) = rt.devices.lock() {
-                    devices.retain(|_, d| now - d.last_seen < DEVICE_TIMEOUT_SECS);
+                    devices.retain(|_, d| {
+                        let timeout = if d.probe_only {
+                            PROBE_DEVICE_TIMEOUT_SECS
+                        } else {
+                            DEVICE_TIMEOUT_SECS
+                        };
+                        now - d.last_seen < timeout
+                    });
                 }
             }
             let _ = socket.send_to(bye_packet.as_bytes(), broadcast_addr);
@@ -165,7 +173,7 @@ pub fn start(
     Ok(stop)
 }
 
-/// 写入/更新设备（保留可信与自动接收标记）
+/// 广播发现的常规设备（5 秒心跳超时）
 pub fn upsert_device(
     rt: &SyncRuntime,
     id: String,
@@ -175,6 +183,35 @@ pub fn upsert_device(
     port: u16,
     fingerprint: String,
 ) {
+    upsert_device_ex(rt, id, name, platform, ip, port, fingerprint, false);
+}
+
+/// 网段探测发现的设备：无广播心跳，用更长的离线超时。
+pub fn upsert_device_probe(
+    rt: &SyncRuntime,
+    id: String,
+    name: String,
+    platform: String,
+    ip: String,
+    port: u16,
+    fingerprint: String,
+) {
+    upsert_device_ex(rt, id, name, platform, ip, port, fingerprint, true);
+}
+
+/// 仅靠网段探测发现的设备存活时长（需大于扫描周期 15 秒 + 余量）。
+const PROBE_DEVICE_TIMEOUT_SECS: i64 = 45;
+
+fn upsert_device_ex(
+    rt: &SyncRuntime,
+    id: String,
+    name: String,
+    platform: String,
+    ip: String,
+    port: u16,
+    fingerprint: String,
+    probe_only: bool,
+) {
     if let Ok(mut devices) = rt.devices.lock() {
         if let Some(existing) = devices.get_mut(&id) {
             existing.name = name;
@@ -183,6 +220,8 @@ pub fn upsert_device(
             existing.port = port;
             existing.last_seen = super::now_secs();
             existing.online = true;
+            // 只要收到过广播心跳就转回常规；仅当两次都是探测发现才保持 probe_only。
+            existing.probe_only = existing.probe_only && probe_only;
             if !fingerprint.is_empty() {
                 existing.fingerprint = fingerprint;
             }
@@ -205,8 +244,171 @@ pub fn upsert_device(
         alias: String::new(),
         last_ip: ip,
         online: true,
+        probe_only,
     };
     if let Ok(mut devices) = rt.devices.lock() {
         devices.insert(id, device);
+    }
+}
+
+// ===== 网段主动探测（热点/AP 隔离下的发现兜底） =====
+//
+// UDP 广播 255.255.255.255 在手机热点、部分路由器上被隔离，导致设备互相发现不到。
+// 这里额外对每个本机网卡所在的 /24 网段做主动探测：先 TCP 快筛开放传输端口的 IP，
+// 再用 mTLS /hello 拿身份。热点场景手机就是网关 .1，必然被覆盖。
+// 与 LocalSend 的 legacy 模式（遍历子网发 register）思路一致。
+
+/// 拿本机所有活跃网卡的 IPv4（不真正发包，仅靠 UDP connect 让内核选出接口 IP）。
+/// 多个目标用于触发多网卡各自暴露；去重后返回。
+fn local_ipv4s() -> Vec<Ipv4Addr> {
+    let targets = [
+        "8.8.8.8:47800",
+        "114.114.114.114:47800",
+        "223.5.5.5:47800",
+        "192.168.1.1:47800",
+        "10.0.0.1:47800",
+    ];
+    let mut ips: Vec<Ipv4Addr> = Vec::new();
+    for target in targets {
+        if let Ok(sock) = UdpSocket::bind("0.0.0.0:0") {
+            if sock.connect(target).is_ok() {
+                if let Ok(addr) = sock.local_addr() {
+                    if let IpAddr::V4(v4) = addr.ip() {
+                        if !v4.is_unspecified() && !v4.is_loopback() && !ips.contains(&v4) {
+                            ips.push(v4);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ips
+}
+
+/// 每秒广播启动的同时拉起网段扫描线程。返回其停止标志（与广播共用 rt.discovery_stop）。
+pub fn start_subnet_scan(rt: Arc<SyncRuntime>, self_id: String, self_name: String) {
+    let stop = rt.discovery_stop.clone();
+    let identity = rt.identity.clone();
+    let scan_stop = stop.clone();
+
+    std::thread::Builder::new()
+        .name("runhelp-sync-subnet-scan".to_string())
+        .spawn(move || {
+            // 首轮立即扫，之后每 15 秒一轮；扫描本身耗时通常 < 2 秒。
+            loop {
+                if scan_stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                scan_round(&rt, &identity, &self_id, &self_name, &scan_stop);
+                // 分段 sleep，便于停止标志及时生效
+                for _ in 0..15 {
+                    if scan_stop.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            }
+        })
+        .map_err(|e| {
+            // 扫描线程启动失败不应阻断发现服务，仅记录到 stderr。
+            eprintln!("启动网段扫描线程失败: {}", e);
+        })
+        .ok();
+}
+
+fn scan_round(
+    rt: &Arc<SyncRuntime>,
+    identity: &super::identity::Identity,
+    self_id: &str,
+    self_name: &str,
+    stop: &Arc<std::sync::atomic::AtomicBool>,
+) {
+    let locals = local_ipv4s();
+    if locals.is_empty() {
+        return;
+    }
+    // 收集本机所有 /24 网段内的候选 IP（跳过 .0/.255 与本机自身）。
+    let mut targets: Vec<Ipv4Addr> = Vec::new();
+    for local in &locals {
+        let oct = local.octets();
+        for last in 1u8..=254 {
+            let cand = Ipv4Addr::new(oct[0], oct[1], oct[2], last);
+            if locals.contains(&cand) {
+                continue;
+            }
+            if !targets.contains(&cand) {
+                targets.push(cand);
+            }
+        }
+    }
+    if targets.is_empty() {
+        return;
+    }
+
+    // 有界并发：把候选 IP 投入 channel，固定 N 个 worker 领取。
+    const WORKERS: usize = 32;
+    let (tx, rx) = mpsc::channel::<Ipv4Addr>();
+    {
+        let tx = tx;
+        for ip in targets {
+            if tx.send(ip).is_err() {
+                break;
+            }
+        }
+    } // drop tx，worker 收完即退出
+
+    let rx = Arc::new(std::sync::Mutex::new(rx));
+    let mut handles = Vec::new();
+    for _ in 0..WORKERS {
+        let rx = rx.clone();
+        let rt = rt.clone();
+        let identity = identity.clone();
+        let self_id = self_id.to_string();
+        let self_name = self_name.to_string();
+        let stop = stop.clone();
+        if let Ok(h) = std::thread::Builder::new().spawn(move || {
+            loop {
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                let ip = {
+                    let guard = match rx.lock() {
+                        Ok(g) => g,
+                        Err(_) => break,
+                    };
+                    match guard.recv_timeout(Duration::from_millis(50)) {
+                        Ok(v) => v,
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                };
+                // TCP 快筛：只探测开放传输端口的 IP，避免对整段做 mTLS 握手。
+                let addr = SocketAddr::from((ip, TRANSFER_PORT));
+                if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_err() {
+                    continue;
+                }
+                let ip_str = ip.to_string();
+                if let Ok((id, name, fp)) =
+                    super::transfer::probe_scan(&ip_str, TRANSFER_PORT, &identity, &self_id, &self_name)
+                {
+                    if !id.is_empty() && !fp.is_empty() {
+                        upsert_device_probe(
+                            &rt,
+                            id,
+                            if name.is_empty() { "未知设备".to_string() } else { name },
+                            "unknown".to_string(),
+                            ip_str,
+                            TRANSFER_PORT,
+                            fp,
+                        );
+                    }
+                }
+            }
+        }) {
+            handles.push(h);
+        }
+    }
+    for h in handles {
+        let _ = h.join();
     }
 }

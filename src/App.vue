@@ -149,6 +149,20 @@ if (initialUiState) {
 
 provide('notify', (msg: string) => showToast(msg));
 
+// 数据库被整体替换（备份恢复）后，通知根组件重载全部数据。
+// SettingsView 恢复成功后调用；此处重新拉项目列表与运行中任务，并同步语言。
+async function reloadAllData() {
+  await loadProjects();
+  await loadRunning();
+  try {
+    const settings = await api.getSettings();
+    setLocale(settings.language || 'zh-CN');
+  } catch {
+    /* 恢复后的库可能尚无该键，保持当前语言即可 */
+  }
+}
+provide('reloadAll', reloadAllData);
+
 // 应用内确认对话框：Tauri 2 默认禁用原生 window.confirm，必须自绘。
 interface ConfirmOptions {
   title?: string;

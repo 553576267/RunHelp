@@ -378,8 +378,15 @@ fn handle_connection(sock: TcpStream, config: rustls::ServerConfig, rt: Arc<Sync
     };
     stream.handshake()?;
     let peer_fp = stream.peer_fingerprint().to_string();
+    // 对端 IP（不带端口）：用于 /hello 反向登记探测方。
+    let peer_ip = stream
+        .sock
+        .peer_addr()
+        .ok()
+        .map(|a| a.ip().to_string())
+        .unwrap_or_default();
     let result = match read_request(&mut stream)? {
-        Some(req) => handle_request(&mut stream, req, &rt, &peer_fp),
+        Some(req) => handle_request(&mut stream, req, &rt, &peer_fp, &peer_ip),
         None => Ok(()),
     };
     stream.close_notify();
@@ -466,10 +473,26 @@ fn handle_manifest(
     write_response(stream, "200 OK", body.as_bytes())
 }
 
-fn handle_request(stream: &mut TlsStream, req: HttpRequest, rt: &Arc<SyncRuntime>, peer_fp: &str) -> Result<(), String> {
+fn handle_request(stream: &mut TlsStream, req: HttpRequest, rt: &Arc<SyncRuntime>, peer_fp: &str, peer_ip: &str) -> Result<(), String> {
     let path = req.path.split('?').next().unwrap_or("");
 
     if req.method == "GET" && path == "/hello" {
+        // 反向登记：对方探测我时带了身份头，就把它也加入我的附近列表。
+        // 指纹用 mTLS 握手提取的 peer_fp（不可伪造），不采信声称的指纹。
+        let from_id = header_safe(req.header("X-RH-Id").unwrap_or(""));
+        if !from_id.is_empty() && !peer_fp.is_empty() && !peer_ip.is_empty() {
+            let from_name = url_decode(req.header("X-RH-Name").unwrap_or(""));
+            let from_platform = header_safe(req.header("X-RH-Platform").unwrap_or(""));
+            super::discovery::upsert_device_probe(
+                rt,
+                from_id,
+                if from_name.is_empty() { "未知设备".to_string() } else { from_name },
+                if from_platform.is_empty() { "unknown".to_string() } else { from_platform },
+                peer_ip.to_string(),
+                super::TRANSFER_PORT,
+                peer_fp.to_string(),
+            );
+        }
         let (id, name, fp) = {
             let conn = crate::state::AppState::open_db_for_sync();
             let id = conn.as_ref().map(|c| super::device_id(c)).unwrap_or_default();
@@ -656,9 +679,46 @@ fn receive_file(
 // ===== 客户端 =====
 
 /// 探测目标设备信息（含指纹）：宽松 TLS 握手，只取 /hello。
-pub fn probe(ip: &str, port: u16, identity: &Identity) -> Result<(String, String, String), String> {
-    let mut stream = connect_tls(ip, port, identity)?;
-    let request = format!("GET /hello HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", ip);
+/// 请求头带上本机身份，服务端据此反向登记本机（一次探测双方互相认识，
+/// 对齐 LocalSend /register 的双向发现效果）。失败时身份头缺失不影响探测本身。
+pub fn probe(
+    ip: &str,
+    port: u16,
+    identity: &Identity,
+    self_id: &str,
+    self_name: &str,
+) -> Result<(String, String, String), String> {
+    probe_inner(ip, port, identity, self_id, self_name, 3, CLIENT_READ_TIMEOUT_SECS)
+}
+
+/// 网段扫描专用探测：连接/读都设短超时，避免逐个 IP 扫描时长时间卡住。
+pub fn probe_scan(
+    ip: &str,
+    port: u16,
+    identity: &Identity,
+    self_id: &str,
+    self_name: &str,
+) -> Result<(String, String, String), String> {
+    probe_inner(ip, port, identity, self_id, self_name, 1, 3)
+}
+
+fn probe_inner(
+    ip: &str,
+    port: u16,
+    identity: &Identity,
+    self_id: &str,
+    self_name: &str,
+    connect_secs: u64,
+    read_secs: u64,
+) -> Result<(String, String, String), String> {
+    let mut stream = connect_tls_with(ip, port, identity, connect_secs, read_secs)?;
+    let request = format!(
+        "GET /hello HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nX-RH-Id: {}\r\nX-RH-Name: {}\r\nX-RH-Platform: {}\r\n\r\n",
+        ip,
+        header_safe(self_id),
+        header_safe(&url_encode(self_name)),
+        std::env::consts::OS,
+    );
     stream.write_all(request.as_bytes()).map_err(|e| e.to_string())?;
     stream.flush().map_err(|e| e.to_string())?;
     let mut response = Vec::new();
@@ -683,16 +743,27 @@ fn json_field(body: &str, key: &str) -> String {
 
 /// 建立 mTLS 连接（宽松握手，身份在应用层按指纹判定）。
 fn connect_tls(ip: &str, port: u16, identity: &Identity) -> Result<TlsStream, String> {
+    // 等待对方点「接收/拒绝」最长 5 分钟；客户端超时要略大，否则会先于服务端断线。
+    connect_tls_with(ip, port, identity, 3, CLIENT_READ_TIMEOUT_SECS)
+}
+
+/// 可指定超时的 mTLS 连接。网段扫描用短超时，避免扫到异常端口时卡死扫描线程。
+fn connect_tls_with(
+    ip: &str,
+    port: u16,
+    identity: &Identity,
+    connect_secs: u64,
+    read_secs: u64,
+) -> Result<TlsStream, String> {
     let addr = format!("{}:{}", ip, port)
         .to_socket_addrs()
         .map_err(|e| e.to_string())?
         .next()
         .ok_or_else(|| "地址解析失败".to_string())?;
-    let sock = TcpStream::connect_timeout(&addr, Duration::from_secs(3))
+    let sock = TcpStream::connect_timeout(&addr, Duration::from_secs(connect_secs))
         .map_err(|e| format!("连接失败: {}", e))?;
-    // 等待对方点「接收/拒绝」最长 5 分钟；客户端超时要略大，否则会先于服务端断线。
-    sock.set_read_timeout(Some(Duration::from_secs(CLIENT_READ_TIMEOUT_SECS))).ok();
-    sock.set_write_timeout(Some(Duration::from_secs(120))).ok();
+    sock.set_read_timeout(Some(Duration::from_secs(read_secs))).ok();
+    sock.set_write_timeout(Some(Duration::from_secs(read_secs))).ok();
     let config = identity::client_config(identity)?;
     let conn = rustls::ClientConnection::new(
         Arc::new(config),

@@ -6,6 +6,7 @@ import type { Script, BackupInfo } from '../types';
 
 const notify = inject<(m: string) => void>('notify', () => {});
 const confirm = inject<(m: string, o?: { title?: string; danger?: boolean; confirmText?: string }) => Promise<boolean>>('confirm', async () => false);
+const reloadAll = inject<() => Promise<void>>('reloadAll', async () => {});
 const settings = ref<Record<string, string>>({});
 const shellOptions = ref<{ value: string; label: string }[]>([]);
 const scripts = ref<Script[]>([]);
@@ -87,7 +88,9 @@ async function restoreBackup(b: BackupInfo) {
   try {
     const msg = await api.restoreBackup(b.name);
     notify(msg);
-    await loadBackups();
+    // 数据库被整体替换：重载本页设置/脚本，并通知根组件刷新项目、任务与语言。
+    await load();
+    await reloadAll();
   } catch (e) {
     notify(t('恢复失败: {error}', { error: String(e) }));
   }

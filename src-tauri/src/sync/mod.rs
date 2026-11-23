@@ -55,6 +55,8 @@ pub struct DeviceInfo {
     pub last_ip: String,
     /// 是否在线（最近广播未超时）
     pub online: bool,
+    /// 是否仅靠网段探测发现（无广播心跳，需更长的离线超时）
+    pub probe_only: bool,
 }
 
 /// 待接收清单中的单项（文件/文字）

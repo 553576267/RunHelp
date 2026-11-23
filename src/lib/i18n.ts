@@ -380,6 +380,8 @@ const en: Record<string, string> = {
   "已收到来自 {name} 的内容，已放入剪贴板": "Received content from {name}, copied to clipboard",
   "已收到来自 {name} 的文字": "Received text from {name}",
   "已移除设备": "Device removed",
+  "删除设备": "Delete device",
+  "确定删除设备「{name}」？将清除其信任与收藏记录；下次在线需重新确认指纹。": "Delete device \"{name}\"? This clears its trust and favorite records; the fingerprint must be confirmed again next time it is online.",
   "手动配对": "Manual pairing",
   "拒绝": "Reject",
   "接收": "Receive",
