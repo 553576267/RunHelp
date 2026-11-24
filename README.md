@@ -2,7 +2,9 @@
 
 Windows 桌面端开发辅助工具：**轻便、快捷、内存占用低**。管理多个项目的常用命令、一键流水线、图片压缩，支持局域网设备间加密直传文件 / 文件夹 / 文字 / 剪贴板，数据全部存于本地 SQLite。
 
-技术栈：Tauri 2 + Vue 3 + TypeScript（前端）+ Rust（后端）+ SQLite（rusqlite，单文件）。
+另提供 **Android 版**：与电脑在同一局域网内直传文件 / 文件夹 / 图片视频 / 应用 / 文字 / 剪贴板，和桌面端完全互通。手机端为触屏重排的独立界面（发送 / 接收 / 设置三页），支持相册图片视频混选、应用安装包导出、收到文件落到「下载/RunHelp」或在文件管理器里一键打开。
+
+技术栈：Tauri 2 + Vue 3 + TypeScript（前端）+ Rust（后端）+ SQLite（rusqlite，单文件），桌面与 Android 共用同一套代码与同步协议。
 
 ## 亮点
 
@@ -10,7 +12,8 @@ Windows 桌面端开发辅助工具：**轻便、快捷、内存占用低**。�
 - **快捷**：秒级冷启动，命令与流水线一键运行，日志实时回显，无需等待
 - **低内存占用**：Rust 原生后端 + 系统 WebView，常驻内存远低于 Electron 类应用
 - **数据本地化**：单文件 SQLite，无需数据库服务与云端账号，所有数据留在自己电脑
-- **局域网直传**：同一局域网内两台电脑互传文件 / 文件夹 / 文字 / 剪贴板，mTLS 加密、指纹确认设备身份，不经云端、无需联网
+- **局域网直传**：同一局域网内设备之间互传文件 / 文件夹 / 文字 / 剪贴板，电脑与电脑、手机与电脑均可，mTLS 加密、指纹确认设备身份，不经云端、无需联网
+- **手机端互通**：Android 版与桌面端同一协议，手机可发相册图片视频、应用安装包，收到文件自动落到「下载/RunHelp」，秒级识别设备上下线
 - **中英双语**：界面文案与运行提示一键切换简体中文 / English，默认中文，即时生效无需重启
 - **完成提醒**：任务成功且窗口不在前台时弹 Windows 系统通知，前台操作不打扰
 - **开源免费**：MIT 协议，无广告、无订阅、无需注册，可自由使用与修改
@@ -24,8 +27,9 @@ Windows 桌面端开发辅助工具：**轻便、快捷、内存占用低**。�
 - **图片压缩**：可调质量/尺寸/格式/命名/元数据等参数并保存为预设；每个预设可指定"使用脚本"；选择文件或目录后一键调用 Python 脚本批量压缩，显示进度与节省空间；支持收藏常用目录
 - **脚本管理**：Python 脚本源码可存入数据库（带版本号），也可外链本地 `.py` 文件；在图片压缩预设里选择后生效
 - **备份与恢复**：内置备份脚本，设置页一键备份到指定目录；恢复前自动另存一份保命备份，恢复后用旧版备份也能自动升级表结构、立即生效
-- **数据同步**：右上角「数据同步」进入，三视图（发送 / 接收 / 设置）。自动发现同一局域网设备，收藏常用设备；可发送文件、文件夹、文字或剪贴板内容，接收方先核对设备指纹、按清单选择要收的文件，逐文件显示实时进度，支持取消发送与拒绝。有人发来数据时自动把窗口置前并切到同步页（可关闭）。全程 mTLS 加密，只在两台电脑之间直传，不经过任何服务器
+- **数据同步**：右上角「数据同步」进入，三视图（发送 / 接收 / 设置）。自动发现同一局域网设备，收藏常用设备；可发送文件、文件夹、文字或剪贴板内容，接收方先核对设备指纹、按清单选择要收的文件，逐文件显示实时进度，支持取消发送与拒绝。有人发来数据时自动把窗口置前并切到同步页（可关闭）。全程 mTLS 加密，只在两台设备之间直传，不经过任何服务器
 - **任务完成通知**：命令 / 流水线 / 图片压缩 / 数据库备份成功后，若窗口不在前台则弹系统通知；设置页可关闭，失败与手动终止不打扰
+- **Android 手机端**：发送页发现附近设备，可发文件、相册图片视频（应用内网格多选，支持按日期分组与类型筛选）、应用安装包、文件夹、文字、剪贴板；接收页核对来源设备后接收，逐文件显示进度，支持部分接收与直接打开保存目录；前台服务保活，退到后台仍能收；收到文件落盘到「下载/RunHelp」或自选文件夹
 - **主题**：深色 / 浅色切换，原生标题栏跟随主题
 - **语言**：简体中文 / English 切换，界面与运行提示同步生效
 - **单实例**：重复点击图标只激活已有窗口，不会开多个实例
@@ -54,6 +58,16 @@ Windows 桌面端开发辅助工具：**轻便、快捷、内存占用低**。�
 
 ![数据同步接收](docs/screenshots/sync-receive.png)
 
+### 手机端（Android）
+
+**发送**：自动发现局域网内的电脑，选中目标后一键发送文件 / 图片视频 / 应用 / 剪贴板 / 文字 / 文件夹
+
+<img src="docs/screenshots/mobile-send.jpg" width="300" alt="手机端发送">
+
+**接收**：核对来源设备后接收，逐文件显示进度，接收完可在应用内直接看收到什么、打开保存目录
+
+<img src="docs/screenshots/mobile-receive.jpg" width="300" alt="手机端接收">
+
 ## 下载安装
 
 - **GitCode（主仓，国内推荐）**：`https://gitcode.com/binglengdexie/RunHelp/releases`
@@ -61,6 +75,8 @@ Windows 桌面端开发辅助工具：**轻便、快捷、内存占用低**。�
 - **Gitee 镜像**：`https://gitee.com/binglengdexie/RunHelp/releases`
 
 下载 `RunHelp_x.x.x_x64-setup.exe` 直接安装即可。三个仓库内容一致：**GitCode 是主仓**，日常开发只推 GitCode；GitHub 与 Gitee 由 GitCode 内置的「仓库镜像 → Push」单向自动同步，仅作为其他地区的访问入口。
+
+**Android 版**：下载 `RunHelp-vX.Y.Z-android-arm64-signed.apk`（arm64 设备，Android 8.0+），传到手机上直接安装。安装包已用固定证书签名，后续版本可直接覆盖升级，无需卸载。手机与电脑需连同一个局域网（同一 WiFi，或手机开热点给电脑连）。
 
 ## 开发
 
@@ -74,6 +90,15 @@ npm run tauri build         # 打包 MSI/NSIS 安装包
 ```
 
 图标由 `scripts/gen_icons.py` 生成（纯标准库）。
+
+**Android 打包**（需 JDK 17+、Android SDK、NDK 27，并用真 node 调用 Tauri CLI）：
+
+```bash
+node node_modules/@tauri-apps/cli/tauri.js android build --apk --target aarch64
+# 产物：src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
+```
+
+签名配置在 `src-tauri/gen/android/keystore.properties`（不入库），release 构建会自动签名。手机端界面在 `src/components/SyncViewMobile.vue` 与 `src/components/mobile/`，桌面端与移动端由 `app_is_mobile` 在 `src/main.ts` 分流，桌面专属 API 全部用 `#[cfg(desktop)]` 隔离。
 
 ## 图片压缩脚本
 
@@ -133,19 +158,23 @@ npm run tauri dev      # 或 npm run tauri build
 ```
 src/                      Vue 前端
   components/             各功能组件
+  components/mobile/      手机端专用组件（接收面板 / 发送状态 / 媒体与应用选择 / 接收目录）
   lib/api.ts              Tauri invoke 封装（参数名与 Rust 端严格一致）
   lib/i18n.ts             前端中英文字典（t / setLocale，key 为中文原文）
 src-tauri/                Rust 后端
   src/commands/           各业务命令（project/command/pipeline/script/settings/compress）
   src/sync/               数据同步：设备发现、mTLS 传输、身份证书、IPC 命令与事件
+  src/mobile.rs           Android 专属桥接（相册、应用、目录、前台服务）
   src/platform/           平台适配层（Shell / 路径 / 外部程序调用）
   src/process.rs          进程 spawn、实时日志、终止进程树、暂停等待
   src/state.rs            全局运行时状态（pid 表、暂停标志）
   src/db.rs               数据库版本化迁移（user_version + 事务 + 迁移前备份）与内置脚本播种
   src/i18n.rs             后端提示字典（tr / trf，语言取自 settings.language）
+  gen/android/            Android 工程与自定义插件 RunhelpMobilePlugin.kt
 migrations/               版本化建表与迁移（当前 user_version=5，含同步设备与指纹）
 scripts/                  Python 压缩 / 备份脚本、图标生成脚本
 docs/screenshots/         README 界面截图
+docs/assets/              README 用到的其它图片（赞赏码）
 ```
 
 ## 命令执行的设计要点（踩坑记录）
@@ -196,3 +225,13 @@ MIT License，详见 [LICENSE](LICENSE)。可自由使用、修改、商用，�
 欢迎提交 Issue 与 Pull Request，流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 更新记录见 [CHANGELOG.md](CHANGELOG.md)。
+
+## 赞赏
+
+如果 RunHelp 对你有帮助，欢迎自愿赞赏支持作者维护项目。
+
+<p align="center">
+  <img src="docs/assets/donation.png" width="280" alt="赞赏码">
+</p>
+
+赞赏为无偿赠与，不构成任何服务购买或软件授权。感谢每一份心意。
