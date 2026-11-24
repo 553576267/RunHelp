@@ -15,7 +15,8 @@ mod windows;
 #[cfg(windows)]
 pub use windows::{
     apply_no_window_flags, available_shells, build_command_spec, build_python_path, default_shell,
-    home_dir, kill_tree, parse_shell, refresh_path_env, STOPPED_EXIT_CODE,
+    home_dir, kill_tree, parse_shell, refresh_path_env, resolve_bash, shell_installed,
+    STOPPED_EXIT_CODE,
 };
 
 #[cfg(not(windows))]
@@ -23,7 +24,8 @@ mod unix;
 #[cfg(not(windows))]
 pub use unix::{
     apply_no_window_flags, available_shells, build_command_spec, build_python_path, default_shell,
-    home_dir, kill_tree, parse_shell, refresh_path_env, STOPPED_EXIT_CODE,
+    home_dir, kill_tree, parse_shell, refresh_path_env, resolve_bash, shell_installed,
+    STOPPED_EXIT_CODE,
 };
 
 use std::io;

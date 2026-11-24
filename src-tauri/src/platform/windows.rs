@@ -29,6 +29,73 @@ pub fn parse_shell(raw: &str) -> ShellKind {
     }
 }
 
+/// 定位 Git for Windows 的 bash.exe。
+///
+/// **不能直接 spawn `"bash"`**：Git for Windows 安装时只把 `<Git>\cmd` 写进 PATH，
+/// 那个目录里只有 `git.exe`，没有 `bash.exe`。从资源管理器启动的 GUI 应用拿到的正是
+/// 这条 PATH，于是 CreateProcess 直接失败（"系统找不到指定的文件"），
+/// 表现就是命令行里 Git Bash 一切正常、应用内选 Git Bash 一律报错。
+///
+/// 查找顺序：显式环境变量 → PATH 里的 bash.exe → 由 PATH 里的 git.exe 反推 `<Git>\bin`
+/// → 几个常见安装位置。
+pub fn resolve_bash() -> Option<PathBuf> {
+    // 便携版 / 非标准安装时可用环境变量指定
+    if let Some(p) = std::env::var_os("RUNHELP_BASH").map(PathBuf::from) {
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+
+    let path_var = std::env::var_os("PATH");
+    let dirs: Vec<PathBuf> = path_var
+        .as_ref()
+        .map(|p| std::env::split_paths(p).collect())
+        .unwrap_or_default();
+
+    // 1) PATH 里直接有 bash.exe
+    for dir in &dirs {
+        let cand = dir.join("bash.exe");
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+
+    // 2) 由 git.exe 反推安装根目录：<Git>\cmd\git.exe → <Git>
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for dir in &dirs {
+        if dir.join("git.exe").is_file() {
+            if let Some(root) = dir.parent() {
+                roots.push(root.to_path_buf());
+            }
+        }
+    }
+
+    // 3) 常见安装位置
+    for base in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
+        if let Some(dir) = std::env::var_os(base) {
+            let dir = PathBuf::from(dir);
+            roots.push(dir.join("Git"));
+            roots.push(dir.join("Programs").join("Git"));
+        }
+    }
+
+    for root in roots {
+        let cand = root.join("bin").join("bash.exe");
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+    None
+}
+
+/// 该 shell 在本机是否真的能启动。目前只有 Git Bash 可能整体缺失。
+pub fn shell_installed(shell: &str) -> bool {
+    match shell.to_lowercase().as_str() {
+        "bash" | "git-bash" => resolve_bash().is_some(),
+        _ => true,
+    }
+}
+
 /// 把 shell + 命令文本转换成抽象命令描述。
 /// cmd 的 chcp 65001 与 PowerShell 的 UTF-8 注入是中文不乱码的关键，不能删。
 pub fn build_command_spec(shell: &str, cmd: &str) -> CommandSpec {
@@ -37,7 +104,13 @@ pub fn build_command_spec(shell: &str, cmd: &str) -> CommandSpec {
             "cmd.exe",
             vec!["/C".into(), format!("chcp 65001 >nul && {}", cmd)],
         ),
-        "bash" | "git-bash" => CommandSpec::new("bash", vec!["-lc".into(), cmd.into()]),
+        "bash" | "git-bash" => {
+            // 用绝对路径启动，避免 PATH 里没有 bash.exe 时直接失败（见 resolve_bash 注释）
+            let program = resolve_bash()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| "bash".to_string());
+            CommandSpec::new(program, vec!["-lc".into(), cmd.into()])
+        }
         _ => CommandSpec::new(
             "powershell.exe",
             vec![

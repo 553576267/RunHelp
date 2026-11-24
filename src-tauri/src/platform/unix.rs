@@ -29,6 +29,16 @@ pub fn parse_shell(raw: &str) -> ShellKind {
     }
 }
 
+/// 非 Windows 上 bash 由系统提供，不需要额外定位。
+pub fn resolve_bash() -> Option<PathBuf> {
+    Some(PathBuf::from("bash"))
+}
+
+/// POSIX 上 bash/sh 由系统提供；缺失时 spawn 会给标准错误，这里不再额外判定。
+pub fn shell_installed(_shell: &str) -> bool {
+    true
+}
+
 /// 非 Windows 骨架：bash 分支与 Windows 一致，其余落到 sh -c。
 pub fn build_command_spec(shell: &str, cmd: &str) -> CommandSpec {
     match shell.to_lowercase().as_str() {

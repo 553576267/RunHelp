@@ -79,6 +79,52 @@ fn emit_line(app: &AppHandle, run_id: &str, stream: &str, line: String) {
     );
 }
 
+/// 统一发结束事件：execute 的正常收尾与 run_shell 的提前失败都走这里，
+/// 保证前端"运行中"状态一定有对应的结束信号（少发一次就留下卡住的角标）。
+fn emit_end(
+    app: &AppHandle,
+    run_id: &str,
+    title: &str,
+    status: &str,
+    code: i32,
+    stderr: &str,
+    duration_ms: u64,
+) {
+    let _ = app.emit(
+        "run://end",
+        RunEndEvent {
+            run_id: run_id.to_string(),
+            title: title.to_string(),
+            status: status.to_string(),
+            exit_code: code,
+            stderr: stderr.to_string(),
+            duration_ms,
+        },
+    );
+}
+
+/// 子进程退出后，等读线程把管道里剩余数据读空的上限（毫秒）。
+///
+/// **不能无限 `join()`**：孙进程（Gradle / Java daemon、常驻服务、被拉起的 GUI）
+/// 会继承管道写句柄，父进程退出后管道仍然不 EOF，读线程会一直阻塞在 `read_until` 上，
+/// 任务就永远停在"运行中"。真实踩过：打包 APK 走 node → gradle → java daemon，
+/// 命令早就结束、APK 都复制好了，界面却一直转圈。
+/// 超时后放弃等待（线程自然 detach，句柄真正关闭时会自行退出），保证状态一定能收尾。
+const READER_DRAIN_TIMEOUT_MS: u64 = 2000;
+
+fn join_reader(handle: std::thread::JoinHandle<()>, timeout_ms: u64) -> bool {
+    let start = Instant::now();
+    let limit = Duration::from_millis(timeout_ms);
+    while start.elapsed() < limit {
+        if handle.is_finished() {
+            let _ = handle.join();
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
 /// 读取设置里的 python_path，若它是具体解释器文件，则把其所在目录前置到 PATH。
 /// 这样子进程里的 `python` / `pip` / `uvicorn` 都解析到用户指定的环境，
 /// 避免 App 继承父进程（如 WorkBuddy）PATH 时用错解释器（典型报错：No module named 'fastapi'）。
@@ -267,11 +313,12 @@ pub fn execute(
         }
     };
 
+    // 读线程可能因为孙进程仍持有管道句柄而永不结束：只等有限时间，不等死。
     if let Some(t) = out_thread {
-        let _ = t.join();
+        join_reader(t, READER_DRAIN_TIMEOUT_MS);
     }
     if let Some(t) = err_thread {
-        let _ = t.join();
+        join_reader(t, READER_DRAIN_TIMEOUT_MS);
     }
     state.runtime.children.lock().unwrap().remove(run_id);
     state.runtime.running_meta.lock().unwrap().remove(run_id);
@@ -301,17 +348,7 @@ pub fn execute(
     }
     let stderr_text = stderr_buf.lock().unwrap().clone();
     let duration_ms = start.elapsed().as_millis() as u64;
-    let _ = app.emit(
-        "run://end",
-        RunEndEvent {
-            run_id: run_id.to_string(),
-            title: title.to_string(),
-            status: status_text.to_string(),
-            exit_code: code,
-            stderr: stderr_text,
-            duration_ms,
-        },
-    );
+    emit_end(&app, run_id, title, status_text, code, &stderr_text, duration_ms);
 
     Ok((code, status_text.to_string()))
 }
@@ -327,6 +364,20 @@ pub fn run_shell(
     label: &str,
 ) -> Result<(i32, String), String> {
     let lang = crate::i18n::lang(state);
+    // shell 可能在本机根本不存在（典型：Git for Windows 只把 <Git>\cmd 放进 PATH，
+    // 那里没有 bash.exe，直接 spawn 会抛"系统找不到指定的文件"，还会留下永不消失的运行中角标）。
+    // 提前判定并**完整收尾**：发一行可读原因 + 结束事件 + 清运行态。
+    if !crate::platform::shell_installed(shell) {
+        let msg = crate::i18n::tr(
+            &lang,
+            "未找到 Git Bash（bash.exe）：请安装 Git for Windows，或把 Git 的 bin 目录加入 PATH",
+        );
+        emit_line(&app, run_id, "stderr", msg.clone());
+        state.runtime.running_meta.lock().unwrap().remove(run_id);
+        state.runtime.history_ids.lock().unwrap().remove(run_id);
+        emit_end(&app, run_id, label, "failed", 1, &msg, 0);
+        return Err(msg);
+    }
     // 只消费抽象后的命令描述，具体 shell 拼接由 platform 层按平台实现。
     let spec = crate::platform::build_command_spec(shell, cmd);
     let mut proc_cmd = ProcCommand::new(spec.program);

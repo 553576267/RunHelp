@@ -148,6 +148,10 @@ static EN: &[(&str, &str)] = &[
     ("命令已保存", "Command saved"),
     ("命令或流水线成功结束后，若窗口不在前台，会在桌面右下角提示；失败和手动停止不弹。", "When a command or pipeline finishes successfully, a notification appears in the bottom-right corner of the desktop if the window is not in focus; no notification on failure or manual stop."),
     ("命令超时，已强制终止", "Command timed out and was force-terminated"),
+    (
+        "未找到 Git Bash（bash.exe）：请安装 Git for Windows，或把 Git 的 bin 目录加入 PATH",
+        "Git Bash (bash.exe) not found: install Git for Windows, or add Git's bin directory to PATH",
+    ),
     ("命令输出会实时显示在这里...", "Command output appears here in real time..."),
     ("命名规则", "Naming rule"),
     ("回收站", "Recycle Bin"),
