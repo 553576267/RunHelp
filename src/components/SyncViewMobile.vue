@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { getVersion } from '@tauri-apps/api/app';
 import {
   NavBar as VanNavBar, Tabbar as VanTabbar, TabbarItem as VanTabbarItem,
   Button as VanButton, Icon as VanIcon, CellGroup as VanCellGroup, Cell as VanCell,
@@ -51,6 +52,16 @@ const {
   approveReceive, approveFingerprint, rejectReceive, receiveAllRequests, openIncoming,
   incomingViewReq, kindLabel, platformLabel, shortFp,
 } = sync;
+
+/* 版本号：读 tauri.conf.json 的 version（Android 的 versionName 也由它生成，
+ * 与桌面端 App.vue 同源），只在设置页底部当页脚显示，不占分组里的可操作区。 */
+const appVersion = ref('');
+const platformTag = /Android/i.test(navigator.userAgent) ? 'Android' : '';
+onMounted(() => {
+  void getVersion()
+    .then((v) => { appVersion.value = v; })
+    .catch(() => { appVersion.value = ''; });
+});
 
 /* 键盘避让由原生 decorView 内边距统一处理（见 MainActivity），
  * 这里不再叠加 visualViewport 计算，否则弹层会被抬高两次。 */
@@ -458,6 +469,11 @@ onBeforeUnmount(() => {
             </template>
           </van-cell>
         </van-cell-group>
+
+        <!-- 版本页脚：只读信息，放在全部分组之外，不干扰上面的可操作项 -->
+        <div v-if="appVersion" class="app-footer">
+          RunHelp v{{ appVersion }}<span v-if="platformTag"> · {{ platformTag }}</span>
+        </div>
       </div>
     </div>
 
@@ -676,6 +692,8 @@ onBeforeUnmount(() => {
 .edit-icon { width: 24px; height: 24px; line-height: 0; vertical-align: middle; display: inline-flex; align-items: center; justify-content: center; border: none; background: transparent; color: var(--accent); cursor: pointer; }
 .edit-icon svg { width: 20px; height: 20px; }
 .settings-actions { padding: 10px 16px 8px; flex-shrink: 0; }
+/* 版本号页脚：居中灰字，可长按选中（报障时能直接复制） */
+.app-footer { padding: 18px 16px 12px; text-align: center; font-size: 12px; line-height: 1.5; letter-spacing: .3px; color: var(--text-2); user-select: text; -webkit-user-select: text; }
 
 /* 底部页签：与页面/手势区同色，去掉下边框与硬投影，底部不再出现割裂的横线 */
 .bottom-tabbar {
