@@ -41,5 +41,7 @@ jobs:
             Windows 安装包（NSIS），下载后直接安装即可。
 
             国内访问 GitHub 慢的用户，可到 GitCode / Gitee 镜像仓库的「发行版」下载同一安装包。
-          releaseDraft: true
+          # 直接发布正式 Release：草稿只有仓库维护者可见且不参与 Latest 判定，
+          # 每发一版攒一个草稿会让发行版列表顺序混乱
+          releaseDraft: false
           prerelease: false
