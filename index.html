@@ -2,7 +2,17 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#e8f0e9" />
+    <!-- 首帧背景：移动端启动即为柔光浅。否则会先按 :root 深色变量渲染一帧，
+         等设置读取完成才切成浅色，看起来就是「先黑一下再出界面」。 -->
+    <script>
+      (function () {
+        var mobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+        document.documentElement.setAttribute('data-theme', mobile ? 'soft-light' : 'dark');
+        document.documentElement.style.backgroundColor = mobile ? '#e8f0e9' : '#14161a';
+      })();
+    </script>
     <title>RunHelp 开发助手</title>
   </head>
   <body>

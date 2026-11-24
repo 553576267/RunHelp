@@ -25,10 +25,26 @@ pub const DISCOVERY_PORT: u16 = 47800;
 pub const TRANSFER_PORT: u16 = 47801;
 /// 协议标识（防止误收其它 UDP 包）
 pub const DISCOVERY_MAGIC: &str = "RUNHELP1";
-/// 设备多久没广播就判定离线（秒）。每秒广播一次，5 秒约等于连续丢 5 包，兼顾灵敏与抗抖动。
-pub const DEVICE_TIMEOUT_SECS: i64 = 5;
-/// 仅靠网段探测发现的设备没有广播心跳，扫描周期 15 秒，离线超时需大于周期避免闪断。
-pub const PROBE_DEVICE_TIMEOUT_SECS: i64 = 45;
+/// 设备多久没收到广播就判定离线（秒）。
+/// 每秒广播一次，这里给到 4 秒（容忍连丢 3 包）：上线是「收到第一包」即刻，
+/// 离线只能靠超时，所以必须小；稳定性交给应用层存活探测兜底（探测成功会刷新 last_probe）。
+/// 注意别等于 LIVENESS_INTERVAL_SECS，否则超时判定与探测刷新卡在同一秒边界会抖。
+pub const DEVICE_TIMEOUT_SECS: i64 = 4;
+/// 只靠网段扫描发现的设备（没有广播心跳）的兜底超时。
+/// 这类设备每 2 秒会被存活探测刷一次 last_probe，正常情况下用不到这个值；
+/// 它只是探测线程异常时的最后一道保险，别设太大否则感知会拖沓。
+pub const PROBE_DEVICE_TIMEOUT_SECS: i64 = 12;
+/// 探测存活有效期（秒）：mTLS /hello 成功一次即认为设备还活着。
+/// 取 5 秒：探测周期 2s、单轮最长约 1s，往返间隔峰值约 3 秒，
+/// 留 2 秒余量避免「探测线程稍微卡一下就被判离线」的假抖动；
+/// 真正的离线由「连续 2 次探测失败」（≈4.4 秒）和广播超时（4 秒）负责，不依赖这个窗口。
+pub const PROBE_FRESH_SECS: i64 = 5;
+/// 近期设备存活探测周期（秒）。2 秒一轮，单台超时 0.9 秒且全部并行，
+/// 一轮总耗时不超过 1 秒，离线最迟「2 次失败 ≈ 4.5 秒」内反映到界面。
+pub const LIVENESS_INTERVAL_SECS: u64 = 2;
+/// 连续探测失败达到该次数才判定离线，避免单次握手抖动导致闪断。
+/// 探测内部不再重试（见 transfer::probe_liveness），重试即下一轮，等价 4.4 秒内两次失败。
+pub const PROBE_OFFLINE_MISSES: u8 = 2;
 
 /// 接收确认超时（秒）：超时未点则自动拒绝，避免 HTTP 线程永久挂起。
 /// 用户反馈 90 秒偏短，这里放宽到 5 分钟；取消发送会立即解除等待。
@@ -46,8 +62,13 @@ pub struct DeviceInfo {
     pub port: u16,
     /// 证书指纹（设备身份证）
     pub fingerprint: String,
-    /// 最近一次收到广播的 Unix 秒
+    /// 最近一次收到广播的 Unix 秒（只由广播/心跳刷新）
     pub last_seen: i64,
+    /// 最近一次 mTLS 探测成功的 Unix 秒（只由 /hello 探测刷新）。
+    /// 与 last_seen 分开计时：热点下广播可能被隔离，靠探测也能维持在线判定，
+    /// 又不会被「探测周期 == 广播超时」卡边界导致抖断。
+    #[serde(default)]
+    pub last_probe: i64,
     pub trusted: bool,
     pub auto_accept: bool,
     /// 是否收藏（常用设备）
@@ -63,14 +84,18 @@ pub struct DeviceInfo {
 }
 
 impl DeviceInfo {
-    /// 在线判定：广播设备 5 秒；仅探测设备 45 秒（扫描周期 15 秒 + 余量）。
+    /// 在线判定：广播心跳新鲜，或最近一次探测成功且没过期。
+    /// 两者取「或」：热点下广播可能被 AP 隔离，但 TCP 探测仍能通，设备不该被判离线；
+    /// 反过来广播还在、探测偶尔超时（手机省电导致握手慢）时也不会闪断。
     pub fn is_online(&self, now: i64) -> bool {
         let timeout = if self.probe_only {
             PROBE_DEVICE_TIMEOUT_SECS
         } else {
             DEVICE_TIMEOUT_SECS
         };
-        now - self.last_seen < timeout
+        let heartbeat = self.last_seen > 0 && now - self.last_seen < timeout;
+        let probed = self.last_probe > 0 && now - self.last_probe < PROBE_FRESH_SECS;
+        heartbeat || probed
     }
 }
 
@@ -121,6 +146,15 @@ pub struct SyncRuntime {
     pub server_stop: Arc<AtomicBool>,
     pub started: AtomicBool,
     pub req_seq: AtomicI64,
+    /// 主动探测并发保护：UI 打开/手动刷新/后台存活探测共用，避免重复探测。
+    pub probe_inflight: AtomicBool,
+    /// 近期设备连续探测失败次数（指纹 -> 次数），避免一次抖动误判离线。
+    pub probe_misses: Mutex<HashMap<String, u8>>,
+    /// 发现层标记「设备列表有变化（新设备/由离线转在线）」，
+    /// 由存活探测线程消费后推 `sync://devices-updated`。
+    /// 发现线程本身没有 AppHandle，无法直接发事件；靠这个标志把「秒级上线」也事件化，
+    /// 不用等前端 5 秒一次的兜底轮询。
+    pub device_dirty: AtomicBool,
 }
 
 impl SyncRuntime {
@@ -135,6 +169,9 @@ impl SyncRuntime {
             server_stop: Arc::new(AtomicBool::new(false)),
             started: AtomicBool::new(false),
             req_seq: AtomicI64::new(0),
+            probe_inflight: AtomicBool::new(false),
+            probe_misses: Mutex::new(HashMap::new()),
+            device_dirty: AtomicBool::new(false),
         }
     }
 

@@ -130,14 +130,46 @@ export const api = {
     call<void>('sync_cancel_send', { ip, transferId }),
   syncSendText: (ip: string, text: string, kind: string, transferId: string) =>
     call<void>('sync_send_text', { ip, text, kind, transferId }),
-  syncSendFiles: (ip: string, paths: string[], transferId: string) =>
-    call<void>('sync_send_files', { ip, paths, transferId }),
+  syncSendFiles: (ip: string, paths: string[], transferId: string, names?: string[]) =>
+    call<void>('sync_send_files', { ip, paths, names: names ?? null, transferId }),
   syncListHistory: (limit: number) =>
     call<import('../types').SyncTransfer[]>('sync_list_history', { limit }),
   syncClearHistory: () => call<void>('sync_clear_history'),
   syncRegenerateIdentity: () => call<string>('sync_regenerate_identity'),
+  syncLogResult: (payload: Record<string, string>) => call<void>('sync_log_result', { payload }),
+  syncProbeRecent: (limit: number) => call<number>('sync_probe_recent', { limit }),
   appIsMobile: () => call<boolean>('app_is_mobile'),
   // 移动端把 content:// URI 解析为可读文件路径；桌面端原样返回。
   mobileResolveUris: (uris: string[]) =>
-    call<{ path: string; name: string }[]>('mobile_resolve_uris', { uris }),
+    call<{ path: string; name: string; rel?: string }[]>('mobile_resolve_uris', { uris }),
+  mobilePickMedia: () => call<string[]>('mobile_pick_media'),
+  mobileListMedia: (limit: number) =>
+    call<{ uri: string; name: string; size: number; mime: string; video: boolean; date: number; thumb: string }[]>(
+      'mobile_list_media',
+      { limit },
+    ),
+  mobileListRecentFiles: (limit: number) =>
+    call<{ uri: string; name: string; size: number; mime: string; date: number }[]>(
+      'mobile_list_recent_files',
+      { limit },
+    ),
+  mobileListApps: (excludeSystem: boolean, excludeNonLaunchable: boolean) =>
+    call<{ package: string; label: string; version: string; size: number; system: boolean; icon: string }[]>(
+      'mobile_list_apps',
+      { excludeSystem, excludeNonLaunchable },
+    ),
+  mobilePrepareApks: (packages: string[]) =>
+    call<{ path: string; name: string }[]>('mobile_prepare_apks', { packages }),
+  mobilePickFiles: () => call<string[]>('mobile_pick_files'),
+  mobilePickFolder: (initial?: string) =>
+    call<{ uri: string; name: string }>('mobile_pick_folder', { initial: initial ?? '' }),
+  mobileExportToDir: (uri: string, paths: string[]) =>
+    call<number>('mobile_export_to_dir', { uri, paths }),
+  mobileSaveToDownloads: (paths: string[]) => call<number>('mobile_save_to_downloads', { paths }),
+  mobileSetTheme: (theme: string) => call<void>('mobile_set_theme', { theme }),
+  mobileStartKeepalive: () => call<void>('mobile_start_keepalive'),
+  mobileStopKeepalive: () => call<void>('mobile_stop_keepalive'),
+  mobileOpenReceiveDir: () => call<void>('mobile_open_receive_dir'),
+  mobileOpenSavedDir: (tree: string, autoExport: boolean) =>
+    call<void>('mobile_open_saved_dir', { tree, autoExport }),
 };

@@ -273,15 +273,49 @@ fn parse_selection(decision: &str, count: usize) -> Vec<usize> {
         .collect()
 }
 
-/// 等待接收方决策；同时监听发送端撤销和 5 分钟超时。
-/// 返回 (选中的索引, 结果原因)：accepted / rejected / cancelled / timeout。
+/// 对端 TCP 连接是否还在：等待决策期间对端不会发任何数据，
+/// 因此 peek 到 0 字节（FIN）或有数据（close_notify）都视为已断开。
+fn socket_connected(sock: &TcpStream) -> bool {
+    if sock.set_nonblocking(true).is_err() {
+        return true;
+    }
+    let alive = match sock.peek(&mut [0u8; 1]) {
+        Ok(0) => false,
+        // 对端主动关闭会先发 TLS close_notify，缓冲区里能看到残留字节
+        Ok(_) => false,
+        Err(e) => !matches!(
+            e.kind(),
+            io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted | io::ErrorKind::BrokenPipe
+        ),
+    };
+    let _ = sock.set_nonblocking(false);
+    alive
+}
+
+/// 发现列表里该指纹的设备是否已判定离线（掉 WiFi / 退出应用后由广播超时判定）。
+fn device_gone(rt: &SyncRuntime, peer_fp: &str) -> bool {
+    if peer_fp.is_empty() {
+        return false;
+    }
+    if let Ok(devices) = rt.devices.lock() {
+        if let Some(d) = devices.values().find(|d| d.fingerprint == peer_fp) {
+            return !d.is_online(super::now_secs());
+        }
+    }
+    false
+}
+
+/// 等待接收方决策；同时监听发送端撤销、发送端掉线和 5 分钟超时。
+/// 返回 (选中的索引, 结果原因)：accepted / rejected / cancelled / timeout / offline。
 /// 原因随 407 响应体回传给发送端，用于显示「对方已拒绝接收」等具体文案。
 fn wait_for_decision(
     rx: &mpsc::Receiver<String>,
     canceled: &Arc<AtomicBool>,
     count: usize,
+    peer_alive: &dyn Fn() -> bool,
 ) -> (Vec<usize>, &'static str) {
     let deadline = Instant::now() + Duration::from_secs(REQUEST_TIMEOUT_SECS);
+    let mut gone_hits = 0u8;
     loop {
         if canceled.load(Ordering::SeqCst) {
             return (Vec::new(), "cancelled");
@@ -294,6 +328,15 @@ fn wait_for_decision(
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return (Vec::new(), "timeout"),
+        }
+        // 发送方中途掉线（退出应用 / 断网）：连续两次判定才结束，避免一次抖动误伤
+        if peer_alive() {
+            gone_hits = 0;
+        } else {
+            gone_hits += 1;
+            if gone_hits >= 2 {
+                return (Vec::new(), "offline");
+            }
         }
         if Instant::now() >= deadline {
             return (Vec::new(), "timeout");
@@ -326,11 +369,18 @@ fn parse_items(req: &HttpRequest) -> Vec<PendingItem> {
 }
 
 /// TOFU：接收方接受后记住发送方指纹（仅内存事件，不做弹窗数据存储）。
-fn trust_after_accept(rt: &SyncRuntime, peer_fp: &str, from: &str, from_name: &str, trusted: bool) {
+fn trust_after_accept(
+    rt: &SyncRuntime,
+    peer_fp: &str,
+    from: &str,
+    from_name: &str,
+    platform: &str,
+    trusted: bool,
+) {
     if trusted || peer_fp.is_empty() {
         return;
     }
-    commands::trust_fingerprint(peer_fp, from, from_name);
+    commands::trust_fingerprint_ex(peer_fp, from, from_name, platform);
     if let Ok(mut fps) = rt.trusted_fps.lock() {
         fps.insert(peer_fp.to_string());
     }
@@ -458,9 +508,17 @@ fn handle_manifest(
             &request_id, &transfer_id, &from_name, &platform, peer_fp, trusted,
             &kind, &display_name, total, count, &items,
         );
-        let decision = wait_for_decision(&rx, &canceled, count);
+        let decision = {
+            let alive = || socket_connected(&stream.sock) && !device_gone(rt, peer_fp);
+            wait_for_decision(&rx, &canceled, count, &alive)
+        };
         if let Ok(mut pending) = rt.pending.lock() {
             pending.remove(&request_id);
+        }
+        // 超时或发送端掉线时通知接收方 UI 收尾，
+        // 否则接收页会一直显示「待接收」，看起来像传输卡住。
+        if decision.1 == "timeout" || decision.1 == "offline" {
+            commands::emit_request_timeout(&transfer_id, decision.1);
         }
         decision
     };
@@ -468,7 +526,7 @@ fn handle_manifest(
     if selected.is_empty() {
         return write_response(stream, "407 Rejected", reason.as_bytes());
     }
-    trust_after_accept(rt, peer_fp, &from, &from_name, trusted);
+    trust_after_accept(rt, peer_fp, &from, &from_name, &platform, trusted);
     let body = selected.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
     write_response(stream, "200 OK", body.as_bytes())
 }
@@ -600,9 +658,15 @@ fn handle_request(stream: &mut TlsStream, req: HttpRequest, rt: &Arc<SyncRuntime
             &kind, &name, size, count, &items,
         );
 
-        let (selected, reason) = wait_for_decision(&rx, &canceled, count);
+        let (selected, reason) = {
+            let alive = || socket_connected(&stream.sock) && !device_gone(rt, peer_fp);
+            wait_for_decision(&rx, &canceled, count, &alive)
+        };
         if let Ok(mut pending) = rt.pending.lock() {
             pending.remove(&request_id);
+        }
+        if reason == "timeout" || reason == "offline" {
+            commands::emit_request_timeout(&transfer_id, reason);
         }
         if selected.is_empty() {
             return write_response(stream, "407 Rejected", reason.as_bytes());
@@ -627,7 +691,7 @@ fn handle_request(stream: &mut TlsStream, req: HttpRequest, rt: &Arc<SyncRuntime
 
     // 首次传输成功后自动记住对方指纹为可信（TOFU）
     if !trusted {
-        commands::trust_fingerprint(peer_fp, &from, &from_name);
+        commands::trust_fingerprint_ex(peer_fp, &from, &from_name, &platform);
         if let Ok(mut fps) = rt.trusted_fps.lock() {
             fps.insert(peer_fp.to_string());
         }
@@ -656,10 +720,16 @@ fn receive_file(
     let mut file = std::fs::File::create(&target).map_err(|e| e.to_string())?;
     let total = data.len() as u64;
     let mut written = 0u64;
+    // 进度节流：64KB 一块逐块上报会让前端每秒重渲染上百次（大文件直接卡死），
+    // 这里按 200ms 合并上报，末块与首块必报，进度条依旧连贯。
+    let mut last_emit = Instant::now();
     for chunk in data.chunks(64 * 1024) {
         file.write_all(chunk).map_err(|e| e.to_string())?;
         written += chunk.len() as u64;
-        commands::emit_receive_progress(&rel, written, total, "receiving");
+        if last_emit.elapsed() >= Duration::from_millis(200) {
+            commands::emit_receive_progress(&rel, written, total, "receiving");
+            last_emit = Instant::now();
+        }
     }
     drop(file);
     commands::emit_receive_progress(&rel, total, total, "done");
@@ -687,8 +757,8 @@ pub fn probe(
     identity: &Identity,
     self_id: &str,
     self_name: &str,
-) -> Result<(String, String, String), String> {
-    probe_inner(ip, port, identity, self_id, self_name, 3, CLIENT_READ_TIMEOUT_SECS)
+) -> Result<ProbeInfo, String> {
+    probe_inner(ip, port, identity, self_id, self_name, 3_000, CLIENT_READ_TIMEOUT_SECS * 1_000)
 }
 
 /// 网段扫描专用探测：连接/读都设短超时，避免逐个 IP 扫描时长时间卡住。
@@ -698,8 +768,37 @@ pub fn probe_scan(
     identity: &Identity,
     self_id: &str,
     self_name: &str,
-) -> Result<(String, String, String), String> {
-    probe_inner(ip, port, identity, self_id, self_name, 1, 3)
+) -> Result<ProbeInfo, String> {
+    probe_inner(ip, port, identity, self_id, self_name, 1_000, 3_000)
+}
+
+/// 存活探测（近期设备专用）：**单次、极短超时**。
+///
+/// 这里曾经是「放宽超时 + 重试一次」：2s 连接 + 6s 读，两次加 350ms 退避，
+/// 单台最坏 ≈ 16 秒。而所有设备的离线重算要等整轮 join 结束才做，
+/// 只要列表里有一台手机被系统冻结（TCP 连得上但应用层不应答），
+/// 整轮就被它拖到十几秒，于是「电脑端识别手机离线」变成 15~40 秒。
+///
+/// 现在改成一轮只给 ~0.9 秒：连接 0.6s / 读 0.9s，失败不重试——
+/// 重试交给下一轮探测（2 秒后），单台卡死只浪费它自己那 0.9 秒。
+pub fn probe_liveness(
+    ip: &str,
+    port: u16,
+    identity: &Identity,
+    self_id: &str,
+    self_name: &str,
+) -> Result<ProbeInfo, String> {
+    probe_inner(ip, port, identity, self_id, self_name, 600, 900)
+}
+
+/// /hello 探测结果。platform 必须一起带回来，否则探测路径只能填 "unknown"，
+/// 会出现「设备类型偶尔变成 unknown」（广播没到时被探测值覆盖）。
+#[derive(Clone, Debug, Default)]
+pub struct ProbeInfo {
+    pub id: String,
+    pub name: String,
+    pub platform: String,
+    pub fingerprint: String,
 }
 
 fn probe_inner(
@@ -708,10 +807,16 @@ fn probe_inner(
     identity: &Identity,
     self_id: &str,
     self_name: &str,
-    connect_secs: u64,
-    read_secs: u64,
-) -> Result<(String, String, String), String> {
-    let mut stream = connect_tls_with(ip, port, identity, connect_secs, read_secs)?;
+    connect_ms: u64,
+    read_ms: u64,
+) -> Result<ProbeInfo, String> {
+    let mut stream = connect_tls_with(
+        ip,
+        port,
+        identity,
+        Duration::from_millis(connect_ms),
+        Duration::from_millis(read_ms),
+    )?;
     let request = format!(
         "GET /hello HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nX-RH-Id: {}\r\nX-RH-Name: {}\r\nX-RH-Platform: {}\r\n\r\n",
         ip,
@@ -725,7 +830,12 @@ fn probe_inner(
     stream.read_to_end(&mut response).map_err(|e| e.to_string())?;
     let text = String::from_utf8_lossy(&response);
     let body = text.split("\r\n\r\n").nth(1).unwrap_or("").trim();
-    Ok((json_field(body, "id"), json_field(body, "name"), json_field(body, "fingerprint")))
+    Ok(ProbeInfo {
+        id: json_field(body, "id"),
+        name: json_field(body, "name"),
+        platform: json_field(body, "platform"),
+        fingerprint: json_field(body, "fingerprint"),
+    })
 }
 
 fn json_field(body: &str, key: &str) -> String {
@@ -744,26 +854,32 @@ fn json_field(body: &str, key: &str) -> String {
 /// 建立 mTLS 连接（宽松握手，身份在应用层按指纹判定）。
 fn connect_tls(ip: &str, port: u16, identity: &Identity) -> Result<TlsStream, String> {
     // 等待对方点「接收/拒绝」最长 5 分钟；客户端超时要略大，否则会先于服务端断线。
-    connect_tls_with(ip, port, identity, 3, CLIENT_READ_TIMEOUT_SECS)
+    connect_tls_with(
+        ip,
+        port,
+        identity,
+        Duration::from_secs(3),
+        Duration::from_secs(CLIENT_READ_TIMEOUT_SECS),
+    )
 }
 
-/// 可指定超时的 mTLS 连接。网段扫描用短超时，避免扫到异常端口时卡死扫描线程。
+/// 可指定超时的 mTLS 连接。网段扫描/存活探测用毫秒级短超时，避免扫到异常端口时卡死线程。
 fn connect_tls_with(
     ip: &str,
     port: u16,
     identity: &Identity,
-    connect_secs: u64,
-    read_secs: u64,
+    connect_timeout: Duration,
+    read_timeout: Duration,
 ) -> Result<TlsStream, String> {
     let addr = format!("{}:{}", ip, port)
         .to_socket_addrs()
         .map_err(|e| e.to_string())?
         .next()
         .ok_or_else(|| "地址解析失败".to_string())?;
-    let sock = TcpStream::connect_timeout(&addr, Duration::from_secs(connect_secs))
+    let sock = TcpStream::connect_timeout(&addr, connect_timeout)
         .map_err(|e| format!("连接失败: {}", e))?;
-    sock.set_read_timeout(Some(Duration::from_secs(read_secs))).ok();
-    sock.set_write_timeout(Some(Duration::from_secs(read_secs))).ok();
+    sock.set_read_timeout(Some(read_timeout)).ok();
+    sock.set_write_timeout(Some(read_timeout)).ok();
     let config = identity::client_config(identity)?;
     let conn = rustls::ClientConnection::new(
         Arc::new(config),

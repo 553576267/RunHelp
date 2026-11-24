@@ -1,20 +1,51 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
-import { invoke } from '@tauri-apps/api/core';
+import { onMounted, provide, ref } from 'vue';
 import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
-import SyncView from './SyncView.vue';
-import { setLocale } from '../lib/i18n';
+import { showToast, showConfirmDialog } from 'vant';
+import { api } from '../lib/api';
+import SyncViewMobile from './SyncViewMobile.vue';
+import { setLocale, t } from '../lib/i18n';
+import { useKeyboardAvoid } from '../lib/useKeyboardAvoid';
 
 const ready = ref(false);
 
-onMounted(async () => {
-  // 移动端跟随系统语言：中文环境用中文，其余用英文（与桌面端设置页独立）。
+// 键盘不再压缩原生窗口（底部页签原地不动），需要避让的输入弹层靠 --kb-height 上移
+useKeyboardAvoid();
+
+// 移动端同步逻辑通过 inject 拿 notify / confirm，这里提供 Vant 实现
+provide('notify', (msg: string) => { showToast(msg); });
+provide('confirm', async (msg: string, o?: { title?: string; danger?: boolean; confirmText?: string }) => {
   try {
-    const navLang = navigator.language || 'zh-CN';
-    setLocale(navLang.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en');
+    await showConfirmDialog({
+      title: o?.title || t('确认'),
+      message: msg,
+      confirmButtonText: o?.confirmText || t('确认'),
+      cancelButtonText: t('取消'),
+      confirmButtonColor: o?.danger ? 'var(--danger)' : 'var(--accent)',
+    });
+    return true;
   } catch {
-    /* ignore */
+    return false;
   }
+});
+
+onMounted(async () => {
+  // 语言：优先用用户在设置页保存的 language，否则跟随系统。
+  let lang = '';
+  let theme = 'soft-light';
+  try {
+    const settings = await api.getSettings();
+    if (settings.language) lang = settings.language;
+    if (settings.mobile_theme) theme = settings.mobile_theme;
+  } catch { /* ignore */ }
+  if (!lang) {
+    const navLang = navigator.language || 'zh-CN';
+    lang = navLang.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en-US';
+  }
+  setLocale(lang);
+  // 柔光浅：参考色 #E8F0E9，移动端默认护眼配色，避免深色页面与系统浅色导航栏产生白边。
+  document.documentElement.setAttribute('data-theme', theme);
+  try { await api.mobileSetTheme(theme); } catch { /* ignore */ }
   // Android 13+ 需运行时申请通知权限，否则收到传输请求时系统通知发不出来。
   try {
     if (!(await isPermissionGranted())) {
@@ -25,58 +56,24 @@ onMounted(async () => {
   }
   ready.value = true;
 });
-
-// 预留：未来若要移动端也调用后端能力，统一从这里 invoke。
-void invoke;
 </script>
 
 <template>
   <div class="mobile-app">
-    <SyncView />
+    <SyncViewMobile v-if="ready" />
   </div>
 </template>
 
 <style>
-/* 全局（非 scoped）：覆盖 SyncView 内部桌面双栏布局，适配手机窄屏 */
-html, body, #app { overscroll-behavior: none; }
+/* 移动端基础样式：Vant 组件样式由 SyncViewMobile.vue 按需引入 */
+html, body, #app { overscroll-behavior: none; height: 100%; }
 
+/* 系统栏/键盘避让交给原生 decorView 内边距处理，这里不再重复加 safe-area 内边距，
+ * 否则底部会出现两层空白。 */
 .mobile-app {
   height: 100%;
   width: 100%;
-  padding-top: env(safe-area-inset-top);
-  padding-bottom: env(safe-area-inset-bottom);
   background: var(--bg-0);
+  overflow: hidden;
 }
-
-.mobile-app .sync-page { padding: 12px; }
-.mobile-app .page-head h2 { font-size: 17px; }
-
-/* 发送页：桌面左右双栏 → 手机上下单栏，各自高度自适应、整体可滚动 */
-.mobile-app .view-body { min-height: 0; flex: 1 1 auto; overflow-y: auto; display: block; }
-.mobile-app .send-layout {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  min-height: 0;
-}
-.mobile-app .device-panel,
-.mobile-app .compose-panel,
-.mobile-app .receive-panel { flex: 0 0 auto; min-height: 0; }
-.mobile-app .device-list { max-height: 260px; }
-.mobile-app .action-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
-.mobile-app .action-card { height: 72px; font-size: 11px; }
-.mobile-app .textarea { min-height: 120px; }
-
-/* 设置页：桌面双列 → 手机单列 */
-.mobile-app .settings-grid { grid-template-columns: 1fr; overflow-y: auto; }
-
-/* 弹窗：桌面固定宽度 → 手机贴近屏宽 */
-.mobile-app .modal-mask { padding: 16px; }
-.mobile-app .modal { max-width: 100%; max-height: 90vh; overflow-y: auto; }
-.mobile-app .send-modal,
-.mobile-app .request-modal,
-.mobile-app .confirm-modal { width: 100%; }
-
-/* 页脚小字可适当缩小 */
-.mobile-app .entry-card { height: 46px; }
 </style>

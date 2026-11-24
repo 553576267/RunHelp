@@ -7,4 +7,6 @@
     <color name="teal_700">#FF018786</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+    <!-- 柔光浅主背景 (#E8F0E9)，与 WebView 页面背景一致，消除系统栏白边 -->
+    <color name="sync_bg">#FFE8F0E9</color>
 </resources>

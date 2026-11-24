@@ -156,7 +156,12 @@ pub fn start(
                 // 否则 15 秒扫描间隔设备会「闪一下就消失」。
                 let now = super::now_secs();
                 if let Ok(mut devices) = rt.devices.lock() {
+                    let before = devices.len();
                     devices.retain(|_, d| d.is_online(now));
+                    // 有设备因超时被清掉：也要推一次事件，否则界面上会「幽灵」停留到下次轮询。
+                    if devices.len() != before {
+                        rt.device_dirty.store(true, Ordering::SeqCst);
+                    }
                 }
             }
             let _ = socket.send_to(bye_packet.as_bytes(), broadcast_addr);
@@ -164,6 +169,18 @@ pub fn start(
         .map_err(|e| format!("启动发现线程失败: {}", e))?;
 
     Ok(stop)
+}
+
+/// 占位名称：探测拿不到真名时的兜底值，不能覆盖已有真实名称。
+fn is_placeholder_name(name: &str) -> bool {
+    let n = name.trim();
+    n.is_empty() || n == "未知设备"
+}
+
+/// 占位平台：探测拿不到平台时的兜底值，不能覆盖已有真实平台。
+fn is_placeholder_platform(platform: &str) -> bool {
+    let p = platform.trim();
+    p.is_empty() || p == "unknown"
 }
 
 /// 广播发现的常规设备（5 秒心跳超时）
@@ -202,13 +219,35 @@ fn upsert_device_ex(
     fingerprint: String,
     probe_only: bool,
 ) {
+    let now = super::now_secs();
+    // 广播发现刷新 last_seen，探测发现只刷新 last_probe：
+    // 两个时间戳分开，才能既容忍广播丢包，又让探测结果维持在线（详见 DeviceInfo::is_online）。
     if let Ok(mut devices) = rt.devices.lock() {
         if let Some(existing) = devices.get_mut(&id) {
-            existing.name = name;
-            existing.platform = platform;
+            // 由离线转为在线也算「列表有变化」：前端要在 1~2 秒内看到它亮起来，
+            // 不能等 5 秒一次的兜底轮询。
+            if !existing.online {
+                rt.device_dirty.store(true, Ordering::SeqCst);
+            }
+            // 探测路径以前只能填 "unknown"/"未知设备" 占位，不能让它覆盖广播拿到的真实信息，
+            // 否则设备类型会「有时变成 unknown」。只有新值有效时才更新。
+            if !is_placeholder_name(&name) {
+                existing.name = name;
+            }
+            if !is_placeholder_platform(&platform) {
+                existing.platform = platform;
+            }
             existing.ip = ip;
             existing.port = port;
-            existing.last_seen = super::now_secs();
+            if probe_only {
+                existing.last_probe = now;
+                // 仅探测发现的设备没有心跳，last_seen 也要跟着走，否则 45 秒兜底超时算不准。
+                if existing.probe_only {
+                    existing.last_seen = now;
+                }
+            } else {
+                existing.last_seen = now;
+            }
             existing.online = true;
             // 只要收到过广播心跳就转回常规；仅当两次都是探测发现才保持 probe_only。
             existing.probe_only = existing.probe_only && probe_only;
@@ -227,7 +266,8 @@ fn upsert_device_ex(
         ip: ip.clone(),
         port,
         fingerprint,
-        last_seen: super::now_secs(),
+        last_seen: now,
+        last_probe: if probe_only { now } else { 0 },
         trusted: false,
         auto_accept: false,
         favorite: false,
@@ -239,6 +279,8 @@ fn upsert_device_ex(
     if let Ok(mut devices) = rt.devices.lock() {
         devices.insert(id, device);
     }
+    // 新设备第一次出现：立刻通知前端刷新，不必等兜底轮询。
+    rt.device_dirty.store(true, Ordering::SeqCst);
 }
 
 // ===== 网段主动探测（热点/AP 隔离下的发现兜底） =====
@@ -378,18 +420,18 @@ fn scan_round(
                     continue;
                 }
                 let ip_str = ip.to_string();
-                if let Ok((id, name, fp)) =
+                if let Ok(info) =
                     super::transfer::probe_scan(&ip_str, TRANSFER_PORT, &identity, &self_id, &self_name)
                 {
-                    if !id.is_empty() && !fp.is_empty() {
+                    if !info.id.is_empty() && !info.fingerprint.is_empty() {
                         upsert_device_probe(
                             &rt,
-                            id,
-                            if name.is_empty() { "未知设备".to_string() } else { name },
-                            "unknown".to_string(),
+                            info.id,
+                            if info.name.is_empty() { "未知设备".to_string() } else { info.name },
+                            if info.platform.is_empty() { "unknown".to_string() } else { info.platform },
                             ip_str,
                             TRANSFER_PORT,
-                            fp,
+                            info.fingerprint,
                         );
                     }
                 }

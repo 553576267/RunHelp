@@ -17,6 +17,8 @@
   --font: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
   --mono: 'Cascadia Code', 'Consolas', 'Microsoft YaHei Mono', monospace;
   --radius: 8px;
+  /* 软键盘高度：由 useKeyboardAvoid 动态写入；默认 0 保证 var() 始终有效 */
+  --kb-height: 0px;
 }
 
 [data-theme='light'] {
@@ -37,7 +39,157 @@
   --danger: #d43b3b;
 }
 
+/* 柔光浅：参考色 #E8F0E9，移动端默认护眼浅色，低对比偏灰绿，长时间看不刺眼 */
+[data-theme='soft-light'] {
+  --bg-0: #e8f0e9;
+  --bg-1: #f3f7f2;
+  --bg-2: #dde8dc;
+  --bg-3: #ccdccb;
+  --border: #c2d2bf;
+  --border-soft: #d5e2d2;
+  --text-0: #23332c;
+  --text-1: #4f6559;
+  --text-2: #849889;
+  --accent: #3f7a63;
+  --accent-hover: #356a56;
+  --accent-soft: rgba(63, 122, 99, 0.12);
+  --success: #3f8a6b;
+  --warn: #a97b2e;
+  --danger: #c15c56;
+
+  --van-primary-color: var(--accent);
+  --van-success-color: var(--success);
+  --van-warning-color: var(--warn);
+  --van-danger-color: var(--danger);
+  --van-text-color: var(--text-0);
+  --van-text-color-2: var(--text-1);
+  --van-text-color-3: var(--text-2);
+  --van-background: var(--bg-0);
+  --van-background-2: var(--bg-1);
+  --van-background-3: var(--bg-2);
+  --van-border-color: var(--border);
+  --van-active-color: var(--bg-3);
+  --van-cell-background: var(--bg-1);
+  --van-cell-text-color: var(--text-0);
+  --van-cell-value-color: var(--text-1);
+  --van-cell-label-color: var(--text-2);
+  --van-nav-bar-background: var(--bg-1);
+  --van-nav-bar-title-text-color: var(--text-0);
+  --van-nav-bar-icon-color: var(--text-1);
+  --van-tabbar-background: var(--bg-1);
+  --van-tabbar-item-text-color: var(--text-2);
+  --van-tabbar-item-active-color: var(--accent);
+  --van-tabs-bottom-bar-color: var(--accent);
+  --van-dialog-background: var(--bg-1);
+  --van-dialog-header-text-color: var(--text-0);
+  --van-dialog-message-text-color: var(--text-1);
+  --van-popup-background: var(--bg-1);
+  --van-popup-text-color: var(--text-0);
+  /* 遮罩淡一点：整屏 rgba 叠加是弹层首帧的主要开销，浅一点更轻也更现代 */
+  --van-overlay-background: rgba(18, 24, 22, 0.34);
+  --van-field-background: var(--bg-1);
+  --van-field-input-text-color: var(--text-0);
+  --van-field-placeholder-text-color: var(--text-2);
+  --van-field-label-color: var(--text-1);
+  --van-button-default-background: var(--bg-2);
+  --van-button-default-color: var(--text-0);
+  --van-button-default-border-color: var(--border);
+  --van-button-primary-background: var(--accent);
+  --van-button-primary-border-color: var(--accent);
+  --van-button-danger-color: var(--danger);
+  --van-button-plain-background: var(--bg-1);
+  --van-tag-primary-color: var(--accent);
+  --van-tag-success-color: var(--success);
+  --van-tag-warning-color: var(--warn);
+  --van-tag-danger-color: var(--danger);
+  --van-progress-background: var(--bg-3);
+  --van-progress-color: var(--accent);
+  --van-empty-text-color: var(--text-2);
+  --van-grid-item-content-background: var(--bg-1);
+  --van-toast-background: var(--bg-3);
+  --van-toast-text-color: var(--text-0);
+  --van-divider-border-color: var(--border);
+  color-scheme: light;
+}
+
+/* 柔光青深色：护眼暗色档，低蓝低对比、偏青绿 */
+[data-theme='soft-cyan'] {
+  --bg-0: #101b1c;
+  --bg-1: #17272a;
+  --bg-2: #1e3235;
+  --bg-3: #274247;
+  --border: #315258;
+  --border-soft: #243b40;
+  --text-0: #d5e6e2;
+  --text-1: #9dbbb5;
+  --text-2: #6c8e8a;
+  --accent: #4fbdb0;
+  --accent-hover: #63cfc1;
+  --accent-soft: rgba(79, 189, 176, 0.14);
+  --success: #57bd93;
+  --warn: #d0a95c;
+  --danger: #d97a72;
+
+  /* Vant 组件跟随柔光青 */
+  --van-primary-color: var(--accent);
+  --van-success-color: var(--success);
+  --van-warning-color: var(--warn);
+  --van-danger-color: var(--danger);
+  --van-text-color: var(--text-0);
+  --van-text-color-2: var(--text-1);
+  --van-text-color-3: var(--text-2);
+  --van-background: var(--bg-0);
+  --van-background-2: var(--bg-1);
+  --van-background-3: var(--bg-2);
+  --van-border-color: var(--border);
+  --van-active-color: var(--bg-3);
+  --van-cell-background: var(--bg-1);
+  --van-cell-text-color: var(--text-0);
+  --van-cell-value-color: var(--text-1);
+  --van-cell-label-color: var(--text-2);
+  --van-nav-bar-background: var(--bg-1);
+  --van-nav-bar-title-text-color: var(--text-0);
+  --van-nav-bar-icon-color: var(--text-1);
+  --van-tabbar-background: var(--bg-1);
+  --van-tabbar-item-text-color: var(--text-2);
+  --van-tabbar-item-active-color: var(--accent);
+  --van-tabs-bottom-bar-color: var(--accent);
+  --van-dialog-background: var(--bg-1);
+  --van-dialog-header-text-color: var(--text-0);
+  --van-dialog-message-text-color: var(--text-1);
+  --van-popup-background: var(--bg-1);
+  --van-popup-text-color: var(--text-0);
+  /* 遮罩淡一点：整屏 rgba 叠加是弹层首帧的主要开销，浅一点更轻也更现代 */
+  --van-overlay-background: rgba(18, 24, 22, 0.34);
+  --van-field-background: var(--bg-1);
+  --van-field-input-text-color: var(--text-0);
+  --van-field-placeholder-text-color: var(--text-2);
+  --van-field-label-color: var(--text-1);
+  --van-button-default-background: var(--bg-2);
+  --van-button-default-color: var(--text-0);
+  --van-button-default-border-color: var(--border);
+  --van-button-primary-background: var(--accent);
+  --van-button-primary-border-color: var(--accent);
+  --van-button-danger-color: var(--danger);
+  --van-button-plain-background: var(--bg-1);
+  --van-tag-primary-color: var(--accent);
+  --van-tag-success-color: var(--success);
+  --van-tag-warning-color: var(--warn);
+  --van-tag-danger-color: var(--danger);
+  --van-progress-background: var(--bg-3);
+  --van-progress-color: var(--accent);
+  --van-empty-text-color: var(--text-2);
+  --van-grid-item-content-background: var(--bg-1);
+  --van-toast-background: var(--bg-3);
+  --van-toast-text-color: var(--text-0);
+  --van-divider-border-color: var(--border);
+  color-scheme: dark;
+}
+
 * { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* 软键盘避让：useKeyboardAvoid 在移动端写入实际键盘高度，桌面端恒为 0 */
+:root { --kb-height: 0px; }
 
 html, body, #app { height: 100%; width: 100%; background: var(--bg-0); }
 

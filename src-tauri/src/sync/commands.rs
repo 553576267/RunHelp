@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tauri::{Emitter, Manager};
 
@@ -99,20 +100,37 @@ pub fn auto_accept_fingerprint(fp: &str) -> bool {
 
 /// TOFU：首次传输确认后记住对方指纹与身份。
 pub fn trust_fingerprint(fp: &str, device_id: &str, name: &str) {
+    trust_fingerprint_ex(fp, device_id, name, "");
+}
+
+/// 带平台的版本：把对端平台一并落库，离线后列表仍能显示设备类型而不是「未知设备」。
+pub fn trust_fingerprint_ex(fp: &str, device_id: &str, name: &str, platform: &str) {
     if fp.is_empty() {
         return;
     }
+    let platform = platform.trim();
+    let has_platform = !platform.is_empty() && platform != "unknown";
     if let Some(conn) = AppState::open_db_for_sync() {
         // 先尝试按指纹更新已有记录
-        let updated = conn.execute(
-            "UPDATE sync_devices SET trusted=1, name=?2, device_id=?3, last_seen=datetime('now','localtime') WHERE fingerprint=?1",
-            rusqlite::params![fp, name, device_id],
-        ).unwrap_or(0);
+        let updated = if has_platform {
+            conn.execute(
+                "UPDATE sync_devices SET trusted=1, name=?2, device_id=?3, platform=?4, \
+                 last_seen=datetime('now','localtime') WHERE fingerprint=?1",
+                rusqlite::params![fp, name, device_id, platform],
+            )
+        } else {
+            conn.execute(
+                "UPDATE sync_devices SET trusted=1, name=?2, device_id=?3, \
+                 last_seen=datetime('now','localtime') WHERE fingerprint=?1",
+                rusqlite::params![fp, name, device_id],
+            )
+        }
+        .unwrap_or(0);
         if updated == 0 {
             let _ = conn.execute(
-                "INSERT INTO sync_devices(device_id, name, fingerprint, trusted, last_seen) \
-                 VALUES(?1,?2,?3,1,datetime('now','localtime'))",
-                rusqlite::params![device_id, name, fp],
+                "INSERT INTO sync_devices(device_id, name, fingerprint, platform, trusted, last_seen) \
+                 VALUES(?1,?2,?3,?4,1,datetime('now','localtime'))",
+                rusqlite::params![device_id, name, fp, platform],
             );
         }
     }
@@ -241,6 +259,16 @@ pub fn emit_request_cancelled(transfer_id: &str) {
     }
 }
 
+/// 接收请求被中止（等待超时 / 发送方掉线）：接收方据此把待接收项标记失效并清理弹窗。
+pub fn emit_request_timeout(transfer_id: &str, reason: &str) {
+    if let Some(app) = AppState::app_handle_for_sync() {
+        let _ = app.emit(
+            "sync://request-timeout",
+            serde_json::json!({ "transfer_id": transfer_id, "reason": reason }),
+        );
+    }
+}
+
 /// 接收进度事件（供接收方 UI 显示进度条）
 pub fn emit_receive_progress(name: &str, received: u64, total: u64, status: &str) {
     if let Some(app) = AppState::app_handle_for_sync() {
@@ -280,6 +308,8 @@ pub fn sync_start(app: tauri::AppHandle) -> Result<(), String> {
     )?;
     // 网段主动探测：热点/AP 隔离下 UDP 广播不可达时的发现兜底。
     discovery::start_subnet_scan(runtime.clone(), device_id, name);
+    // 近期设备存活探测：只探已知 IP，连续失败即置离线，解决热点下「上线快、离线慢」。
+    start_recent_liveness(app.clone());
     runtime.started.store(true, Ordering::SeqCst);
     // 移动端启动前台服务 + WakeLock，避免锁屏/切后台后 UDP 发现与 TCP 监听被冻结。
     // 桌面端是空实现，无副作用。
@@ -370,12 +400,13 @@ pub fn sync_list_devices(app: tauri::AppHandle) -> Result<Vec<DeviceInfo>, Strin
             if d.fingerprint.is_empty() {
                 continue;
             }
-            if let Ok((trusted, auto, fav, alias, last_ip)) = conn.query_row(
-                "SELECT trusted, auto_accept, favorite, alias, last_ip FROM sync_devices WHERE fingerprint=?1",
+            if let Ok((trusted, auto, fav, alias, last_ip, db_name, db_platform)) = conn.query_row(
+                "SELECT trusted, auto_accept, favorite, alias, last_ip, name, platform FROM sync_devices WHERE fingerprint=?1",
                 [&d.fingerprint],
                 |r| Ok((
                     r.get::<_, i32>(0)?, r.get::<_, i32>(1)?, r.get::<_, i32>(2)?,
-                    r.get::<_, String>(3)?, r.get::<_, String>(4)?,
+                    r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
                 )),
             ) {
                 d.trusted = trusted != 0;
@@ -385,26 +416,50 @@ pub fn sync_list_devices(app: tauri::AppHandle) -> Result<Vec<DeviceInfo>, Strin
                 if !last_ip.is_empty() {
                     d.last_ip = last_ip;
                 }
+                // 内存里没拿到平台（例如只从数据库补出来的离线记录）时用库里的值补上，
+                // 避免列表显示成「unknown / 未知设备」。
+                if d.platform.trim().is_empty() || d.platform == "unknown" {
+                    if !db_platform.trim().is_empty() && db_platform != "unknown" {
+                        d.platform = db_platform.clone();
+                    }
+                }
+                // 设备改名/平台变化后，在线期间把发现到的新信息回写数据库，
+                // 否则离线后列表从 sync_devices 表补记录时会显示旧名字/旧平台。
+                // 只在值真正变化时写，alias（用户自定义别名）不受影响。
+                if d.online && !d.name.is_empty() && db_name != d.name {
+                    let _ = conn.execute(
+                        "UPDATE sync_devices SET name=?1, last_ip=?2 WHERE fingerprint=?3",
+                        [&d.name, &d.ip, &d.fingerprint],
+                    );
+                }
+                if d.online && !d.platform.trim().is_empty() && d.platform != "unknown"
+                    && db_platform != d.platform
+                {
+                    let _ = conn.execute(
+                        "UPDATE sync_devices SET platform=?1 WHERE fingerprint=?2",
+                        rusqlite::params![&d.platform, &d.fingerprint],
+                    );
+                }
             }
         }
     }
-    // 合并数据库里收藏但当前不在线的设备（离线常驻）
+    // 合并最近连接过的设备（离线常驻），让「近期设备」始终可见且状态即时可判
     if let Some(conn) = AppState::open_db_for_sync() {
-        if let Ok(mut stmt) = conn.prepare("SELECT device_id, name, fingerprint, last_ip, trusted, auto_accept, favorite, alias FROM sync_devices WHERE favorite=1 OR trusted=1") {
+        if let Ok(mut stmt) = conn.prepare("SELECT device_id, name, fingerprint, last_ip, trusted, auto_accept, favorite, alias, platform FROM sync_devices ORDER BY last_seen DESC LIMIT 10") {
             if let Ok(rows) = stmt.query_map([], |r| Ok((
                 r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?, r.get::<_, i32>(4)?, r.get::<_, i32>(5)?,
-                r.get::<_, i32>(6)?, r.get::<_, String>(7)?,
+                r.get::<_, i32>(6)?, r.get::<_, String>(7)?, r.get::<_, String>(8)?,
             ))) {
                 for row in rows.flatten() {
-                    let (id, name, fp, last_ip, trusted, auto, fav, alias) = row;
+                    let (id, name, fp, last_ip, trusted, auto, fav, alias, platform) = row;
                     if fp.is_empty() || devices.iter().any(|d| d.fingerprint == fp) {
                         continue;
                     }
                     devices.push(DeviceInfo {
-                        id, name, platform: String::new(),
+                        id, name, platform: if platform == "unknown" { String::new() } else { platform },
                         ip: last_ip.clone(), port: super::TRANSFER_PORT,
-                        fingerprint: fp, last_seen: 0,
+                        fingerprint: fp, last_seen: 0, last_probe: 0,
                         trusted: trusted != 0, auto_accept: auto != 0,
                         favorite: fav != 0, alias, last_ip, online: false, probe_only: false,
                     });
@@ -453,18 +508,22 @@ pub fn sync_pair_device(app: tauri::AppHandle, ip: String) -> Result<DeviceInfo,
         let sname = conn.as_ref().map(|c| super::display_name(c)).unwrap_or_default();
         (sid, sname)
     };
-    let (id, name, fp) = transfer::probe(&ip, super::TRANSFER_PORT, &identity, &self_id, &self_name)?;
-    if id.is_empty() || fp.is_empty() {
+    let probed = transfer::probe(&ip, super::TRANSFER_PORT, &identity, &self_id, &self_name)?;
+    if probed.id.is_empty() || probed.fingerprint.is_empty() {
         return Err("目标不是 RunHelp 设备或端口不可达".to_string());
     }
+    let id = probed.id.clone();
     let info = DeviceInfo {
         id: id.clone(),
-        name,
-        platform: std::env::consts::OS.to_string(),
+        name: if probed.name.is_empty() { "未知设备".to_string() } else { probed.name },
+        // 平台必须用 /hello 返回的对方平台，之前错误地填了本机 OS，
+        // 导致手动添加的设备类型显示成自己这台机器的系统。
+        platform: if probed.platform.trim().is_empty() { "unknown".to_string() } else { probed.platform },
         ip: ip.clone(),
         port: super::TRANSFER_PORT,
-        fingerprint: fp,
+        fingerprint: probed.fingerprint,
         last_seen: super::now_secs(),
+        last_probe: super::now_secs(),
         trusted: false,
         auto_accept: false,
         favorite: false,
@@ -672,6 +731,7 @@ pub fn sync_send_files(
     app: tauri::AppHandle,
     ip: String,
     paths: Vec<String>,
+    names: Option<Vec<String>>,
     transfer_id: String,
 ) -> Result<(), String> {
     let runtime = rt(&app);
@@ -708,10 +768,16 @@ pub fn sync_send_files(
                 if files.is_empty() {
                     return Err("没有可发送的文件".to_string());
                 }
+                let display_names = names.unwrap_or_default();
                 let items: Vec<super::PendingItem> = files
                     .iter()
-                    .map(|(name, path)| super::PendingItem {
-                        name: name.clone(),
+                    .enumerate()
+                    .map(|(i, (name, path))| super::PendingItem {
+                        name: if display_names.get(i).map(|n| !n.is_empty()).unwrap_or(false) {
+                            display_names[i].clone()
+                        } else {
+                            name.clone()
+                        },
                         size: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
                     })
                     .collect();
@@ -822,6 +888,262 @@ fn record_transfer(direction: &str, kind: &str, name: &str, size: u64, status: &
             rusqlite::params![direction, kind, name, size as i64, status, error],
         );
     }
+}
+
+/// 后台存活探测：同步服务启动后每 2 秒探测一次近期设备。
+/// 只访问已知 IP，比 /24 全段扫描轻得多；状态真正变化时才通知前端刷新。
+///
+/// 这个线程同时承担「发现层的变更广播」：UDP 发现线程没有 AppHandle，
+/// 它只在设备新增/由离线转在线/超时被清掉时把 `device_dirty` 置位，
+/// 由这里统一 emit `sync://devices-updated`，于是上线也是 1~2 秒级，不靠前端轮询。
+pub fn start_recent_liveness(app: tauri::AppHandle) {
+    let runtime = rt(&app);
+    std::thread::Builder::new()
+        .name("runhelp-sync-liveness".to_string())
+        .spawn(move || loop {
+            if runtime.discovery_stop.load(Ordering::SeqCst) {
+                break;
+            }
+            // 分段 sleep：停止同步时能立刻退出，不必等满一个周期。
+            // 每 500ms 检查一次发现层标志，让新设备尽快「亮」起来。
+            for _ in 0..(super::LIVENESS_INTERVAL_SECS * 2) {
+                if runtime.discovery_stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(500));
+                if runtime.device_dirty.swap(false, Ordering::SeqCst) {
+                    let _ = app.emit("sync://devices-updated", ());
+                }
+            }
+            if runtime.started.load(Ordering::SeqCst) {
+                probe_recent_async(&app, 10, false, false);
+            }
+        })
+        .ok();
+}
+
+/// 主动探测最近连接过的设备（最多 limit 台），立即判定在线/离线。
+/// 探测放到后台线程异步执行，command 立即返回候选数量，绝不阻塞调用线程/IPC worker。
+/// 手动/页面打开调用 notify_always=true；后台存活探测用 false，仅在状态变化时发事件。
+/// `strict`：手动刷新时启用——一次不应答就判离线（LocalSend 的手动刷新语义：
+/// 「没应答的设备就是不可达」，用户点了刷新要立刻看到真实结果，而不是等两次失败计数）。
+fn probe_recent_async(app: &tauri::AppHandle, limit: usize, notify_always: bool, strict: bool) -> usize {
+    let runtime = rt(app);
+    // 页面打开、手动刷新、后台存活探测可能同时触发；同一时刻只跑一轮，避免重复握手。
+    if runtime.probe_inflight
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        // 手动刷新（页面打开 / 下拉刷新）正好撞上后台探测时，不能直接把这次刷新丢掉：
+        // 等上一轮结束（≤1 秒）立刻补一轮，否则用户点了刷新却看不到任何变化。
+        if notify_always {
+            let app2 = app.clone();
+            let rt2 = runtime.clone();
+            std::thread::spawn(move || {
+                for _ in 0..20 {
+                    std::thread::sleep(Duration::from_millis(100));
+                    if !rt2.probe_inflight.load(Ordering::SeqCst) {
+                        probe_recent_async(&app2, limit, true, strict);
+                        return;
+                    }
+                }
+                let _ = app2.emit("sync://devices-updated", ());
+            });
+        }
+        return 0;
+    }
+    let mut candidates: Vec<(String, String, String, String)> = {
+        let Some(conn) = AppState::open_db_for_sync() else {
+            runtime.probe_inflight.store(false, Ordering::SeqCst);
+            return 0;
+        };
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT device_id, name, fingerprint, last_ip FROM sync_devices \
+             WHERE last_ip != '' ORDER BY last_seen DESC LIMIT ?1"
+        ) else {
+            runtime.probe_inflight.store(false, Ordering::SeqCst);
+            return 0;
+        };
+        let Ok(rows) = stmt.query_map([limit as i64], |r| Ok((
+            r.get::<_, String>(0)?, r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?, r.get::<_, String>(3)?,
+        ))) else {
+            runtime.probe_inflight.store(false, Ordering::SeqCst);
+            return 0;
+        };
+        rows.filter_map(|r| r.ok()).filter(|(_, _, _, ip)| !ip.is_empty()).collect()
+    };
+    // 广播发现但还没入库的设备（第一次见、没建立信任）也要探活，
+    // 否则它们只能等广播超时，离线感知明显比上线慢。
+    if let Ok(devices) = runtime.devices.lock() {
+        for d in devices.values() {
+            if d.ip.is_empty() || d.probe_only {
+                continue;
+            }
+            if candidates
+                .iter()
+                .any(|(_, _, fp, ip)| fp == &d.fingerprint || ip == &d.ip)
+            {
+                continue;
+            }
+            candidates.push((d.id.clone(), d.name.clone(), d.fingerprint.clone(), d.ip.clone()));
+        }
+    }
+    let count = candidates.len();
+    if candidates.is_empty() {
+        runtime.probe_inflight.store(false, Ordering::SeqCst);
+        return 0;
+    }
+    let (self_id, self_name) = {
+        let conn = AppState::open_db_for_sync();
+        (
+            conn.as_ref().map(|c| super::device_id(c)).unwrap_or_default(),
+            conn.as_ref().map(|c| super::display_name(c)).unwrap_or_default(),
+        )
+    };
+    let app_bg = app.clone();
+    let changed = Arc::new(AtomicBool::new(false));
+    // 关键：spawn 后立即返回；join 全在后台线程内完成，不占用同步 command 的 worker。
+    std::thread::spawn(move || {
+        let identity = runtime.identity.clone();
+        let handles: Vec<_> = candidates
+            .into_iter()
+            .map(|(id, name, fp, ip)| {
+                let rt = runtime.clone();
+                let identity = identity.clone();
+                let self_id = self_id.clone();
+                let self_name = self_name.clone();
+                let changed = changed.clone();
+                let app_dev = app_bg.clone();
+                std::thread::spawn(move || {
+                    // 单台设备的结果立刻落到运行时并**立刻推事件**。
+                    // 之前要等整轮 join 之后才重算并发事件：只要列表里有一台手机被系统冻结
+                    // （TCP 连得上、应用层不应答），整轮就被它拖住，其它设备的上下线也一起延迟。
+                    let mut flipped = false;
+                    match transfer::probe_liveness(&ip, super::TRANSFER_PORT, &identity, &self_id, &self_name) {
+                        Ok(info) => {
+                            let use_id = if info.id.is_empty() { id } else { info.id };
+                            let use_fp = if info.fingerprint.is_empty() { fp } else { info.fingerprint };
+                            // 探测成功即清零失败计数；原本离线的设备要通知前端立刻刷新。
+                            if let Ok(mut misses) = rt.probe_misses.lock() {
+                                misses.remove(&use_fp);
+                            }
+                            let was_online = rt.devices.lock().ok()
+                                .and_then(|devices| devices.values()
+                                    .find(|d| d.fingerprint == use_fp)
+                                    .map(|d| d.online))
+                                .unwrap_or(false);
+                            discovery::upsert_device_probe(
+                                &rt, use_id,
+                                if info.name.is_empty() { name } else { info.name },
+                                if info.platform.trim().is_empty() { "unknown".to_string() } else { info.platform },
+                                ip, super::TRANSFER_PORT, use_fp,
+                            );
+                            if !was_online {
+                                flipped = true;
+                            }
+                        }
+                        Err(_) => {
+                            // 连续失败达到阈值才判离线，避免单次握手抖动造成设备闪断。
+                            let mut mark_offline = false;
+                            if strict {
+                                // 手动刷新：不应答即离线，追求「点一下就是真实状态」。
+                                if let Ok(mut misses) = rt.probe_misses.lock() {
+                                    misses.remove(&fp);
+                                }
+                                mark_offline = true;
+                            } else if let Ok(mut misses) = rt.probe_misses.lock() {
+                                let n = misses.entry(fp.clone()).or_insert(0);
+                                *n = n.saturating_add(1);
+                                if *n >= super::PROBE_OFFLINE_MISSES {
+                                    *n = 0;
+                                    mark_offline = true;
+                                }
+                            }
+                            if mark_offline {
+                                let now = super::now_secs();
+                                if let Ok(mut devices) = rt.devices.lock() {
+                                    if let Some(d) = devices.values_mut().find(|d| {
+                                        (!fp.is_empty() && d.fingerprint == fp)
+                                            || d.last_ip == ip || d.ip == ip
+                                    }) {
+                                        // 两个时间戳都要清：只要有一个还新鲜就仍算在线。
+                                        // 广播心跳仍在时不动它（交给 DEVICE_TIMEOUT_SECS 处理）。
+                                        let heartbeat_fresh = d.last_seen > 0
+                                            && now - d.last_seen < super::DEVICE_TIMEOUT_SECS;
+                                        if d.online && !heartbeat_fresh {
+                                            d.online = false;
+                                            d.last_seen = 0;
+                                            d.last_probe = 0;
+                                            flipped = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if flipped {
+                        changed.store(true, Ordering::SeqCst);
+                        let _ = app_dev.emit("sync://devices-updated", ());
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            let _ = h.join();
+        }
+        // 整轮结束后再按时间戳扫一遍：广播停了的设备即使探测还没轮到，
+        // 也能在本周期内反映到界面，而不必等失败计数攒够。
+        let state_changed = {
+            let now = super::now_secs();
+            let mut flipped = false;
+            if let Ok(mut devices) = runtime.devices.lock() {
+                for d in devices.values_mut() {
+                    let online = d.is_online(now);
+                    if online != d.online {
+                        d.online = online;
+                        flipped = true;
+                    }
+                }
+            }
+            flipped
+        };
+        if notify_always || changed.load(Ordering::SeqCst) || state_changed {
+            let _ = app_bg.emit("sync://devices-updated", ());
+        }
+        runtime.probe_inflight.store(false, Ordering::SeqCst);
+    });
+    count
+}
+
+/// 主动探测最近连接过的设备（Tauri 命令入口）。
+#[tauri::command]
+pub fn sync_probe_recent(app: tauri::AppHandle, limit: usize) -> Result<usize, String> {
+    Ok(probe_recent_async(&app, limit, true, true))
+}
+
+/// 把同步结果写入运行日志（桌面端日志面板可见）。
+/// 由前端在成功/失败/拒绝时调用，保证日志包含双方名称、类型和内容简述。
+#[tauri::command]
+pub fn sync_log_result(app: tauri::AppHandle, payload: serde_json::Value) -> Result<(), String> {
+    let from = payload.get("from").and_then(|v| v.as_str()).unwrap_or("本机");
+    let to = payload.get("to").and_then(|v| v.as_str()).unwrap_or("未知设备");
+    let kind = payload.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    let content = payload.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    let result = payload.get("result").and_then(|v| v.as_str()).unwrap_or("");
+    let detail = payload.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+    let line = format!(
+        "[数据同步] {}(发送方) → {}(接收方) · {} · {} · {}{}",
+        from, to, result, kind, content,
+        if detail.is_empty() { String::new() } else { format!(" · {}", detail) }
+    );
+    let stream = if result == "失败" || result == "拒绝" { "stderr" } else { "info" };
+    let _ = app.emit("run://log", crate::models::LogEvent {
+        run_id: "sync".to_string(),
+        stream: stream.to_string(),
+        line,
+    });
+    Ok(())
 }
 
 /// 传输历史
