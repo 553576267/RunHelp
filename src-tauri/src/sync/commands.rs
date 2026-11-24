@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tauri::{Emitter, Manager};
 
@@ -151,6 +151,11 @@ fn focus_on_request_enabled() -> bool {
         .unwrap_or(true)
 }
 
+/// 通知接收方「有人要发东西给你」。
+///
+/// **不再携带 items 明细**：文件夹可能有几百上千个文件，把整份清单塞进事件，
+/// 前端要在弹层入场动画那一帧做反序列化，这就是「收到传输请求弹层卡一下」的来源。
+/// 弹层只需要数量/总大小；明细由前端在真正打开接收页时用 `sync_pending_items` 按需拉。
 pub fn emit_request(
     id: &str,
     transfer_id: &str,
@@ -162,7 +167,6 @@ pub fn emit_request(
     name: &str,
     size: u64,
     count: usize,
-    items: &[super::PendingItem],
 ) {
     if let Some(app) = AppState::app_handle_for_sync() {
         // 收到请求时把窗口拉到桌面前端（show + 取消最小化 + 置焦），
@@ -194,10 +198,6 @@ pub fn emit_request(
                 .body(body)
                 .show();
         }
-        let item_values: Vec<_> = items
-            .iter()
-            .map(|i| serde_json::json!({ "name": i.name, "size": i.size }))
-            .collect();
         let _ = app.emit(
             "sync://request",
             serde_json::json!({
@@ -211,7 +211,7 @@ pub fn emit_request(
                 "name": name,
                 "size": size,
                 "count": count,
-                "items": item_values,
+                "items": [],
                 "focus": focus,
             }),
         );
@@ -477,6 +477,7 @@ pub fn sync_list_devices(app: tauri::AppHandle) -> Result<Vec<DeviceInfo>, Strin
 }
 
 /// 接收页手动刷新：读取当前内存中的待确认请求（不落库，不打断自动刷新）。
+/// 明细不在列表里返回，见 `sync_pending_items`。
 #[tauri::command]
 pub fn sync_list_pending(app: tauri::AppHandle) -> Result<Vec<serde_json::Value>, String> {
     let holder = rt(&app);
@@ -492,8 +493,23 @@ pub fn sync_list_pending(app: tauri::AppHandle) -> Result<Vec<serde_json::Value>
         "name": p.name,
         "size": p.size,
         "count": p.count,
-        "items": p.items,
+        "items": [],
     })).collect())
+}
+
+/// 按需拉取某个待接收请求的文件明细。
+///
+/// 请求事件只带数量：文件夹几百上千项时，把清单塞进事件会让弹层入场那一帧
+/// 卡住（JSON 反序列化）。前端在真正打开接收页时才调这里。
+#[tauri::command]
+pub fn sync_pending_items(app: tauri::AppHandle, transfer_id: String) -> Result<Vec<super::PendingItem>, String> {
+    let holder = rt(&app);
+    let pending = holder.pending.lock().map_err(|e| e.to_string())?;
+    Ok(pending
+        .values()
+        .find(|p| p.transfer_id == transfer_id)
+        .map(|p| p.items.clone())
+        .unwrap_or_default())
 }
 
 /// 手动添加设备：填 IP，探测拿到指纹与设备信息后加入附近列表（信任仍需 TOFU 确认）。
@@ -796,33 +812,47 @@ pub fn sync_send_files(
                 }
                 emit_send_status(&app_bg, &bg_id, "accepted", 0, selected.len() as u64);
                 let accepted_total: u64 = selected.iter().map(|&i| items.get(i).map(|x| x.size).unwrap_or(0)).sum();
-                let mut sent = 0u64;
-                for &index in &selected {
-                    if bg_flag.load(Ordering::SeqCst) {
-                        emit_send_status(&app_bg, &bg_id, "cancelled", sent, accepted_total);
+                let chosen: Vec<(String, PathBuf)> = selected
+                    .iter()
+                    .filter_map(|&i| files.get(i).cloned())
+                    .collect();
+                // 整批复用一条 TLS 连接发送：以前每个文件一次握手，发几百个文件的文件夹
+                // 会把 CPU 占满几秒，前端表现为「状态页持续卡顿」。
+                // 进度按 150ms 合并上报：128KB 一块回调很密，大文件每秒上百次会淹没前端。
+                let mut last_emit = Instant::now();
+                let app_prog = app_bg.clone();
+                let id_prog = bg_id.clone();
+                let mut on_progress = |sent: u64, _file_sent: u64| {
+                    if last_emit.elapsed() >= Duration::from_millis(150) {
+                        emit_progress(
+                            &app_prog,
+                            &ProgressEvent {
+                                transfer_id: id_prog.clone(),
+                                sent,
+                                total: accepted_total,
+                                status: "transferring".to_string(),
+                            },
+                        );
+                        last_emit = Instant::now();
+                    }
+                };
+                match transfer::send_files_bulk(
+                    &ip,
+                    super::TRANSFER_PORT,
+                    &runtime_bg.identity,
+                    &from_id,
+                    &from_name,
+                    &chosen,
+                    &bg_id,
+                    &bg_flag,
+                    &mut on_progress,
+                ) {
+                    Ok(_) => {}
+                    Err(e) if e.contains("撤销") || bg_flag.load(Ordering::SeqCst) => {
+                        emit_send_status(&app_bg, &bg_id, "cancelled", 0, chosen.len() as u64);
                         return Ok(None);
                     }
-                    let (rel, path) = match files.get(index) {
-                        Some(v) => v,
-                        None => continue,
-                    };
-                    let data = std::fs::read(path).map_err(|e| format!("读取 {} 失败: {}", path.display(), e))?;
-                    transfer::send_file(
-                        &ip,
-                        super::TRANSFER_PORT,
-                        &runtime_bg.identity,
-                        &from_id,
-                        &from_name,
-                        rel,
-                        &data,
-                        files.len(),
-                        &bg_id,
-                        true,
-                    )?;
-                    sent += data.len() as u64;
-                    emit_progress(&app_bg, &ProgressEvent {
-                        transfer_id: bg_id.clone(), sent, total: accepted_total, status: "transferring".to_string(),
-                    });
+                    Err(e) => return Err(e),
                 }
                 Ok(Some((files, selected, accepted_total)))
             })();

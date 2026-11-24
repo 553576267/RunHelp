@@ -111,12 +111,55 @@ pub fn mobile_open_receive_dir(app: AppHandle) -> Result<(), String> {
     }
 }
 
-/// 打开接收文件的落点目录：
-/// - 传了 SAF 目录树 → 打开该文件夹
-/// - 否则自动保存开启 → 打开 系统下载/RunHelp
-/// - 都没有 → 打开应用私有接收目录
+/// 接收目录里的一条文件（应用内「接收目录」弹层用）。
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct SavedFile {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub size: i64,
+    /// 修改时间（Unix 毫秒）
+    #[serde(default)]
+    pub date: i64,
+    #[serde(default)]
+    pub uri: String,
+    #[serde(default)]
+    pub mime: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SavedFileList {
+    #[serde(default)]
+    pub dir: String,
+    #[serde(default)]
+    pub items: Vec<SavedFile>,
+}
+
+/// 列出接收目录里的文件（SAF 目录 / 下载 RunHelp / 私有目录）。
+///
+/// 不再让系统文件管理器去开「按路径拼出来的目录 URI」——那在鸿蒙/EMUI 上会白屏卡死。
 #[tauri::command]
-pub fn mobile_open_saved_dir(app: AppHandle, tree: String, auto_export: bool) -> Result<(), String> {
+pub fn mobile_list_saved_files(app: AppHandle, tree: String) -> Result<SavedFileList, String> {
+    #[cfg(target_os = "android")]
+    {
+        let plugin = app
+            .try_state::<MobilePlugin<tauri::Wry>>()
+            .ok_or("移动插件未初始化")?;
+        plugin
+            .0
+            .run_mobile_plugin::<SavedFileList>("listSavedFiles", serde_json::json!({ "tree": tree }))
+            .map_err(|e| format!("读取接收目录失败: {}", e))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, tree);
+        Err("当前平台不支持该操作".to_string())
+    }
+}
+
+/// 打开接收目录里的某个文件。
+#[tauri::command]
+pub fn mobile_open_saved_file(app: AppHandle, uri: String, mime: String) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
         let plugin = app
@@ -125,15 +168,35 @@ pub fn mobile_open_saved_dir(app: AppHandle, tree: String, auto_export: bool) ->
         plugin
             .0
             .run_mobile_plugin::<()>(
-                "openSavedDir",
-                serde_json::json!({ "tree": tree, "autoExport": auto_export }),
+                "openSavedFile",
+                serde_json::json!({ "uri": uri, "mime": mime }),
             )
-            .map_err(|e| format!("打开目录失败: {}", e))
+            .map_err(|e| format!("打开文件失败: {}", e))
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = (app, tree, auto_export);
-        Ok(())
+        let _ = (app, uri, mime);
+        Err("当前平台不支持该操作".to_string())
+    }
+}
+
+/// 用系统文件管理器打开接收目录（次要入口）：有 SAF 授权开 tree，否则只开存储根。
+#[tauri::command]
+pub fn mobile_open_fm_root(app: AppHandle, tree: String) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let plugin = app
+            .try_state::<MobilePlugin<tauri::Wry>>()
+            .ok_or("移动插件未初始化")?;
+        plugin
+            .0
+            .run_mobile_plugin::<()>("openFmRoot", serde_json::json!({ "tree": tree }))
+            .map_err(|e| format!("打开文件管理器失败: {}", e))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, tree);
+        Err("当前平台不支持该操作".to_string())
     }
 }
 

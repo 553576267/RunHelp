@@ -181,6 +181,7 @@ export interface SyncRequestEvent {
   name: string;
   size: number;
   count: number;
+  /** 明细按需拉取（后端事件里恒为空数组），见 sync_pending_items */
   items: SyncRequestItem[];
   /** 后端是否已按设置把窗口置前；前端据此决定是否自动切到同步页 */
   focus?: boolean;

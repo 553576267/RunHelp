@@ -1,0 +1,309 @@
+/* ==========================================================================
+ * 移动端同步页公共样式
+ *
+ * 为什么是「非 scoped 的独立 CSS」：页面已经被拆成 SyncViewMobile（骨架/发送页/
+ * 设置页）+ MobileReceivePane / SendStatusSheet / MediaPickerSheet / AppPickerSheet。
+ * 拆分的意义是让进度事件只重绘弹层自己，但每个子组件各自写一份 scoped 样式会产生
+ * 大量重复；这些类名只在移动端页面内使用（桌面对应组件用的是 .sync-page / .action-card
+ * 等另一套类名），因此集中放这里统一维护。
+ * ========================================================================== */
+
+/* ---------- 页面骨架片段（子组件根节点复用） ---------- */
+/* 注意：类名不能叫 .view-body——桌面端 SyncView.vue 也用它且是横向 flex。 */
+.m-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; padding-bottom: 10px; }
+.zone-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px 8px; font-size: 13px; font-weight: 500; color: var(--text-1); flex-shrink: 0; }
+.zone-head.spaced { margin-top: 8px; }
+.zone-sub { font-size: 12px; font-weight: 400; color: var(--text-2); }
+/* .muted / .mono 由全局 style.css 提供，这里不重复定义（本文件是全局样式，
+ * 重复定义会反向污染桌面端）。 */
+.tiny { font-size: 10px; }
+.spin { animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- 接收页：摘要卡 + 文件列表 ---------- */
+.receive-summary { flex-shrink: 0; }
+.receive-summary .van-empty { padding: 34px 0; }
+.receive-card { margin: 0 12px 10px; padding: 12px 14px; border-radius: 14px; background: var(--bg-1); border: 1px solid var(--border-soft); }
+.receive-card.rejected { opacity: .6; }
+.receive-card.expired { opacity: .75; border-color: var(--border); }
+.receive-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.receive-head strong { font-size: 14px; }
+.kind-chip { font-size: 11px; padding: 2px 8px; border-radius: 9px; background: var(--accent-soft); color: var(--accent); }
+.stage { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: var(--bg-3); color: var(--text-1); }
+.stage.done { color: var(--success); }
+.stage.rejected { color: var(--danger); }
+.stage.receiving { color: var(--accent); }
+.receive-card .receive-progress { margin-top: 12px; }
+
+.file-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; margin: 0 12px; border-radius: 16px; background: var(--bg-1); border: 1px solid var(--border-soft); overflow: hidden; }
+.file-head { display: flex; align-items: center; justify-content: space-between; padding: 11px 14px; font-size: 12px; font-weight: 600; color: var(--text-1); background: var(--bg-2); border-bottom: 1px solid var(--border-soft); flex-shrink: 0; }
+.file-count { font-weight: 400; font-size: 11px; color: var(--text-2); }
+.file-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 10px 10px; }
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  margin-bottom: 6px;
+  border-radius: 11px;
+  background: var(--bg-0);
+  border: 1px solid var(--border-soft);
+}
+.file-row:last-child { margin-bottom: 0; }
+/* 状态指示：待接收=空心圆点，接收中=转圈，完成=对勾 */
+.file-state {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--bg-2);
+  color: var(--text-2);
+}
+.state-ring { width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--text-2); opacity: .7; }
+.file-state.done { background: var(--accent-soft); color: var(--success); }
+.file-state.receiving { background: var(--accent-soft); color: var(--accent); }
+.file-main { flex: 1; min-width: 0; }
+.file-name { font-size: 13px; color: var(--text-0); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-size { margin-top: 2px; font-size: 11px; color: var(--text-2); }
+.file-tag { flex-shrink: 0; font-size: 10px; padding: 2px 7px; border-radius: 8px; background: var(--bg-2); color: var(--text-2); }
+.file-tag.done { color: var(--success); background: var(--accent-soft); }
+.file-tag.receiving { color: var(--accent); background: var(--accent-soft); }
+.file-tag.expired { color: var(--text-2); background: var(--bg-2); }
+
+/* 按钮贴住页面底部：上方留白自动撑开 */
+.receive-actions { display: grid; grid-template-columns: repeat(2, 1fr); gap: 9px; padding: 12px 12px 4px; margin-top: auto; flex-shrink: 0; }
+
+/* ---------- 底部弹层（发送状态 / 接收请求 / 指纹确认） ---------- */
+.sheet { background: var(--bg-1) !important; }
+.sheet-body { padding: 18px 18px 20px; }
+.sheet-title { font-size: 16px; font-weight: 500; margin-bottom: 14px; }
+.status-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 0; font-size: 13px; }
+.sheet-actions { display: flex; gap: 10px; margin-top: 16px; }
+.sheet-actions .van-button { flex: 1; }
+.fp-hint { font-size: 12px; color: var(--text-2); line-height: 1.6; margin-bottom: 10px; }
+.fp-code { color: var(--accent); word-break: break-all; }
+.send-progress { margin: 14px 0; }
+
+/* ---------- 发送状态整页（LocalSend ProgressPage 式） ----------
+ * 不是弹层：没有位移入场，只有一次 160ms 淡入。弹层的 transform 动画需要
+ * 连续合帧，动画期间任何一次数据写入（进度事件/清单构建）都会掉帧。
+ */
+.send-page {
+  position: fixed;
+  inset: 0;
+  z-index: 2200;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-0);
+  padding: 14px 20px 18px;
+  animation: send-page-in .16s ease-out;
+}
+@keyframes send-page-in { from { opacity: 0; } to { opacity: 1; } }
+.send-page-head { display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; height: 34px; }
+.send-page-title { font-size: 15px; font-weight: 600; color: var(--text-0); }
+.send-page-close { border: 0; background: transparent; color: var(--text-2); padding: 6px; display: inline-flex; }
+.send-page-body { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 10px 0; }
+.send-page-device { font-size: 19px; font-weight: 600; color: var(--text-0); text-align: center; word-break: break-all; }
+.send-page-state { font-size: 13px; color: var(--text-2); }
+.send-page-state.transferring { color: var(--accent); }
+.send-page-state.done { color: var(--success); }
+.send-page-state.error { color: var(--danger); }
+.send-page-percent { font-size: 54px; font-weight: 600; line-height: 1; color: var(--text-0); font-variant-numeric: tabular-nums; }
+.send-page-percent span { font-size: 20px; font-weight: 500; margin-left: 3px; color: var(--text-2); }
+.send-page-bar { width: 100%; max-width: 320px; }
+.send-page-meta { font-size: 12px; color: var(--text-2); text-align: center; word-break: break-all; max-width: 88%; }
+.send-page-detail { font-size: 12px; color: var(--danger); text-align: center; }
+.send-page-actions { display: flex; flex-direction: column; gap: 10px; flex-shrink: 0; padding-top: 10px; }
+
+/* ---------- 应用内接收目录弹层 ---------- */
+.dir-sheet { max-height: 76vh; display: flex; flex-direction: column; }
+.dir-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding: 16px 16px 10px; flex-shrink: 0; }
+.dir-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.dir-title strong { font-size: 15px; color: var(--text-0); word-break: break-all; }
+.dir-actions { display: flex; gap: 10px; flex-shrink: 0; }
+.dir-link { border: 0; background: transparent; color: var(--accent); font-size: 12px; padding: 4px 2px; }
+.dir-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 10px 8px; }
+.dir-empty { display: flex; align-items: center; justify-content: center; padding: 40px 0; }
+.dir-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--border-soft);
+  background: var(--bg-0);
+  border-radius: 11px;
+  padding: 10px 12px;
+  margin-bottom: 6px;
+  color: var(--text-0);
+}
+.dir-icon { color: var(--accent); flex-shrink: 0; }
+.dir-name { flex: 1; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dir-meta { font-size: 11px; color: var(--text-2); flex-shrink: 0; }
+.dir-foot { padding: 10px 16px 18px; margin-top: 0; }
+
+/* ---------- 全屏选择器（相册 / 应用） ---------- */
+.full-picker {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-0) !important;
+  border-radius: 0;
+}
+/* 弹层内部自成一体：把布局/绘制限制在自身，弹层动画时不用回溯整页 */
+.full-picker .picker-scroll { contain: layout paint; }
+.picker-head {
+  flex-shrink: 0;
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--bg-0);
+  border-bottom: 1px solid var(--border-soft);
+}
+.picker-back {
+  width: 34px; height: 34px; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; border-radius: 50%; background: var(--bg-2); color: var(--text-1); cursor: pointer;
+}
+.picker-title { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.picker-title strong { font-size: 15px; font-weight: 600; color: var(--text-0); }
+.picker-sub { margin-top: 1px; font-size: 11px; color: var(--text-2); }
+.picker-done {
+  flex-shrink: 0; padding: 7px 14px; border: none; border-radius: 16px;
+  background: var(--accent); color: #fff; font-size: 13px; font-weight: 500; cursor: pointer;
+}
+.picker-done:disabled { background: var(--bg-3); color: var(--text-2); }
+.picker-head-actions { display: flex; align-items: center; gap: 4px; }
+
+/* 选择器内筛选条：相册（全部/照片/视频）、应用（搜索框） */
+.picker-filter {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-0);
+  border-bottom: 1px solid var(--border-soft);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.picker-filter::-webkit-scrollbar { display: none; }
+.filter-chip {
+  flex-shrink: 0;
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 6px 13px; border: 1px solid var(--border-soft); border-radius: 16px;
+  background: var(--bg-1); color: var(--text-1); font-size: 13px; cursor: pointer;
+  transition: background .14s, color .14s, border-color .14s;
+}
+.filter-chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.chip-count { font-size: 11px; opacity: .7; }
+.app-search { padding: 8px 12px; overflow: visible; }
+.search-box {
+  flex: 1; display: flex; align-items: center; gap: 7px;
+  padding: 0 12px; height: 36px;
+  border-radius: 18px; background: var(--bg-2); color: var(--text-2);
+}
+.search-input {
+  flex: 1; min-width: 0; height: 100%;
+  border: none; outline: none; background: transparent;
+  color: var(--text-0); font-size: 13px;
+}
+.search-input::-webkit-search-cancel-button { display: none; }
+.search-clear {
+  width: 20px; height: 20px; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; border-radius: 50%; background: var(--bg-3); color: var(--text-1); cursor: pointer;
+}
+.picker-more {
+  width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center;
+  border: none; border-radius: 50%; background: transparent; color: var(--text-1); cursor: pointer;
+}
+.app-menu {
+  position: absolute; right: 10px; top: 52px; z-index: 5;
+  min-width: 212px; padding: 4px 12px;
+  border-radius: 12px; background: var(--bg-1);
+  border: 1px solid var(--border-soft);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .16);
+}
+.app-menu-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 0; font-size: 13px; color: var(--text-1); }
+.app-menu-row + .app-menu-row { border-top: 1px solid var(--border-soft); }
+
+.picker-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 0 8px 12px;
+}
+.picker-hint { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 70px 0; font-size: 13px; color: var(--text-2); }
+.picker-foot { flex-shrink: 0; padding: 10px 14px 14px; border-top: 1px solid var(--border-soft); background: var(--bg-0); }
+
+.section-label {
+  position: sticky; top: 0; z-index: 2;
+  padding: 12px 6px 8px;
+  font-size: 12px; font-weight: 600; color: var(--text-1);
+  background: linear-gradient(var(--bg-0) 72%, transparent);
+}
+
+/* 相册网格：3 列正方形，间距收紧到系统相册的观感 */
+.media-section { padding-bottom: 2px; }
+.media-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; }
+.media-cell {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--bg-2);
+  cursor: pointer;
+}
+.media-cell img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.media-cell.on::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 2.5px solid var(--accent);
+  border-radius: 4px;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+.media-fallback { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--text-2); }
+.media-video {
+  position: absolute; right: 5px; bottom: 5px; width: 18px; height: 18px; border-radius: 50%;
+  background: rgba(0, 0, 0, .5); color: #fff; display: inline-flex; align-items: center; justify-content: center;
+}
+.media-check {
+  position: absolute; left: 5px; top: 5px;
+  min-width: 20px; height: 20px; padding: 0 5px;
+  border-radius: 10px; border: 1.5px solid rgba(255, 255, 255, .9);
+  background: rgba(0, 0, 0, .22);
+  color: transparent; font-size: 11px; line-height: 18px; text-align: center;
+  transition: background .12s, color .12s;
+}
+.media-check.show { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* 应用网格：4 列图标 + 名称 */
+.app-scroll { padding: 8px 8px 16px; }
+.app-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px 2px; }
+.app-cell {
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  padding: 8px 4px; border: none; border-radius: 12px; background: transparent; cursor: pointer;
+}
+.app-cell.on { background: var(--accent-soft); }
+.app-icon { position: relative; width: 46px; height: 46px; display: inline-flex; align-items: center; justify-content: center; }
+.app-icon img { width: 46px; height: 46px; border-radius: 12px; display: block; }
+.app-badge {
+  position: absolute; right: -3px; top: -3px;
+  min-width: 17px; height: 17px; padding: 0 4px;
+  border-radius: 9px; border: 1.5px solid var(--bg-0);
+  background: var(--accent); color: #fff; font-size: 10px; line-height: 14px; text-align: center;
+}
+.app-label { width: 100%; font-size: 11px; color: var(--text-1); text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.app-size { font-size: 10px; color: var(--text-2); }

@@ -1,4 +1,4 @@
-import { ref, computed, onMounted, onUnmounted, inject } from 'vue';
+import { ref, computed, markRaw, onMounted, onUnmounted, inject, provide } from 'vue';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 import { writeText, readText } from '@tauri-apps/plugin-clipboard-manager';
@@ -37,7 +37,16 @@ export interface ReceiveTask {
   trusted: boolean;
   kind: string;
   total: number;
+  /** 文件明细：请求事件不再携带，接收页打开时才按需拉取（文件夹几百项时是关键优化） */
   items: { name: string; size: number; received: number; status: 'pending' | 'receiving' | 'done' }[];
+  /** 清单里应有的条目数（明细未加载时也算得出总数） */
+  itemCount: number;
+  /** 明细是否已拉取 */
+  itemsLoaded: boolean;
+  /** 接收页未打开时也累计进度，用于百分比 */
+  receivedBytes: number;
+  /** 每个文件上一次上报的已收字节，用于把进度换算成增量 */
+  progressByName: Record<string, number>;
   stage: 'incoming' | 'receiving' | 'done' | 'rejected' | 'expired';
   /** 失效原因：等待超时 / 发送方掉线 */
   expireReason?: 'timeout' | 'offline';
@@ -71,6 +80,24 @@ export interface AppEntry {
   size: number;
   system: boolean;
   icon: string;
+}
+
+/* ------------------------------------------------------------------
+ * 同步上下文：移动端页面被拆成多个子组件（接收页、发送状态弹层、相册、应用列表），
+ * 目的是把「进度事件 → 整页重渲染」收敛成「只重绘弹层自己那几十个节点」。
+ * 子组件通过 useSyncContext() 拿到与父组件同一份状态，避免几十个 prop 层层透传。
+ * ------------------------------------------------------------------ */
+export type SyncContext = ReturnType<typeof useSync>;
+const SYNC_CTX_KEY = Symbol('runhelp-sync-ctx');
+
+export function provideSyncContext(ctx: SyncContext) {
+  provide(SYNC_CTX_KEY, ctx);
+}
+
+export function useSyncContext(): SyncContext {
+  const ctx = inject<SyncContext | null>(SYNC_CTX_KEY, null);
+  if (!ctx) throw new Error('useSyncContext() 只能用在 SyncViewMobile 的子组件里');
+  return ctx;
 }
 
 /**
@@ -112,6 +139,12 @@ export function useSync() {
    */
   const sendVisible = ref(false);
 
+  /* ---------- 应用内「接收目录」 ---------- */
+  const receiveDirOpen = ref(false);
+  const receiveDirLoading = ref(false);
+  const receiveDirItems = ref<{ name: string; size: number; date: number; uri: string; mime: string }[]>([]);
+  const receiveDirLabel = ref('');
+
   /* ---------- 应用内相册（图片 + 视频混选） ---------- */
   const mediaPickerOpen = ref(false);
   const mediaLoading = ref(false);
@@ -149,7 +182,9 @@ export function useSync() {
   const receiveTaskPercent = computed(() => {
     const task = activeReceive.value;
     if (!task || !task.total) return 0;
-    const done = task.items.reduce((sum, i) => sum + i.received, 0);
+    const done = task.items.length
+      ? task.items.reduce((sum, i) => sum + i.received, 0)
+      : task.receivedBytes;
     return Math.min(100, Math.round(done / task.total * 100));
   });
 
@@ -164,6 +199,9 @@ export function useSync() {
   }
 
   function buildReceiveTask(req: SyncRequestEvent): ReceiveTask {
+    // 明细一律延迟：事件里的 items 恒为空（后端已经瘦身），几百项清单在主线程建对象
+    // 正好卡在弹层入场动画那一帧。真正打开接收页时用 loadReceiveItems 拉。
+    const inline = req.items ?? [];
     return {
       id: req.id,
       transferId: req.transfer_id,
@@ -173,10 +211,70 @@ export function useSync() {
       trusted: req.trusted,
       kind: req.kind,
       total: req.size,
-      items: req.items.map((item) => ({ name: item.name, size: item.size, received: 0, status: 'pending' })),
+      items: inline.map((item) => ({ name: item.name, size: item.size, received: 0, status: 'pending' })),
+      itemCount: req.count || inline.length,
+      itemsLoaded: inline.length > 0,
+      receivedBytes: 0,
+      progressByName: {},
       stage: 'incoming',
     };
   }
+
+  /**
+   * 收到文件的提示合并。
+   * 文件夹动辄几百个文件，每收到一个就弹一次 Toast 会让界面持续掉帧（每条都要走一遍
+   * 渲染与动画）；600ms 内的多次「收到」合并成一条，单文件仍是原来的措辞。
+   */
+  let recvNotice: { from: string; dest: string; count: number } | null = null;
+  let recvNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+  function queueReceivedNotice(from: string, dest: string) {
+    recvNotice = recvNotice ?? { from, dest, count: 0 };
+    recvNotice.count += 1;
+    if (recvNoticeTimer) clearTimeout(recvNoticeTimer);
+    recvNoticeTimer = setTimeout(() => {
+      const batch = recvNotice;
+      recvNotice = null;
+      recvNoticeTimer = null;
+      if (!batch) return;
+      notify(
+        batch.count > 1
+          ? t('已收到来自 {name} 的 {count} 个文件：{path}', {
+              name: batch.from,
+              count: String(batch.count),
+              path: batch.dest,
+            })
+          : t('已收到 {name} 的文件：{path}', { name: batch.from, path: batch.dest }),
+      );
+    }, 600);
+  }
+
+  /** 拉取当前待接收任务的明细（接收页打开时调用，只拉一次） */
+  async function loadReceiveItems() {
+    const task = activeReceive.value;
+    if (!task || task.itemsLoaded) return;
+    task.itemsLoaded = true;
+    try {
+      const items = await api.syncPendingItems(task.transferId);
+      // 拉取期间任务可能已被替换/取消
+      const cur = activeReceive.value;
+      if (!cur || cur.transferId !== task.transferId) return;
+      const done = cur.stage === 'done';
+      cur.items = items.map((item) => ({
+        name: item.name,
+        size: item.size,
+        received: done ? item.size : 0,
+        status: done ? ('done' as const) : ('pending' as const),
+      }));
+      cur.itemCount = cur.items.length || cur.itemCount;
+      if (cur.items.length && cur.items.every((i) => i.status === 'done')) cur.stage = 'done';
+    } catch (e) {
+      task.itemsLoaded = false;
+      notify(String(e));
+    }
+  }
+
+  /** 在「下一帧才建接收清单」的窗口期内被取消/超时的传输，避免卡片迟到复活 */
+  const cancelledTransferIds = new Set<string>();
 
   async function load() {
     try {
@@ -197,7 +295,18 @@ export function useSync() {
     unlisteners.push(
       await listen<SyncRequestEvent>('sync://request', (e) => {
         const req = e.payload;
-        activeReceive.value = buildReceiveTask(req);
+        // 顺序有讲究：先把弹层亮出来（用户感知的是「弹得快不快」），
+        // 接收清单（文件夹可能几百条）放到下一帧再建，别和入场动画抢同一帧。
+        if (isMobile.value) {
+          void nextPaint().then(() => {
+            // 期间被取消/超时就不要把卡片再塞回接收页
+            if (!cancelledTransferIds.has(req.transfer_id)) activeReceive.value = buildReceiveTask(req);
+          });
+        } else {
+          activeReceive.value = buildReceiveTask(req);
+          // 桌面端不放弹层，接收页要立刻显示明细
+          void loadReceiveItems();
+        }
         if (!req.trusted) fpDialog.value = req;
         else requestDialog.value = req;
         // 桌面端直接切到接收页签；移动端不切，避免接收页渲染与弹层动画抢同一帧造成卡顿
@@ -211,6 +320,17 @@ export function useSync() {
         const d = e.payload;
         const task = activeReceive.value;
         if (!task) return;
+        if (task.stage === 'incoming') task.stage = 'receiving';
+        // 明细可能还没拉（接收页没打开）：只累计字节，百分比照样能走。
+        // 进度事件按文件上报的是该文件的绝对已收字节，所以按文件名记上一次的值算增量。
+        const prev = task.progressByName[d.name] ?? 0;
+        const nextBytes = d.status === 'done' ? d.total : d.received;
+        if (nextBytes > prev) {
+          task.receivedBytes += nextBytes - prev;
+          task.progressByName[d.name] = nextBytes;
+        }
+        // 明细未加载时没有行可画，逐项更新可以整段跳过
+        if (!task.items.length) return;
         const item = task.items.find((i) => i.name === d.name);
         if (!item) return;
         if (d.status === 'done') {
@@ -220,8 +340,7 @@ export function useSync() {
           item.received = d.received;
           item.status = 'receiving';
         }
-        if (task.stage === 'incoming') task.stage = 'receiving';
-        if (task.items.length && task.items.every((i) => i.status === 'done')) task.stage = 'done';
+        if (task.items.every((i) => i.status === 'done')) task.stage = 'done';
       })
     );
     unlisteners.push(
@@ -231,7 +350,7 @@ export function useSync() {
         if (task) {
           const item = task.items.find((i) => i.name === d.name) ?? task.items[0];
           if (item) { item.received = item.size; item.status = 'done'; }
-          if (task.items.every((i) => i.status === 'done')) task.stage = 'done';
+          if (task.items.length && task.items.every((i) => i.status === 'done')) task.stage = 'done';
         }
         if (d.kind === 'text' || d.kind === 'clipboard') {
           try {
@@ -245,9 +364,8 @@ export function useSync() {
           addReceivedPath(d.path);
           // 移动端实际落点是「下载/RunHelp」或用户选的文件夹，不能再把应用私有目录报给用户
           const dest = receiveDestLabel();
-          const shownPath = dest || d.path;
-          notify(t('已收到 {name} 的文件：{path}', { name: d.from, path: shownPath }));
-          logResult('receive', d.from, status.value?.device_name || '本机', d.kind, d.name || d.path, t('成功'), shownPath);
+          queueReceivedNotice(d.from, dest || d.path);
+          logResult('receive', d.from, status.value?.device_name || '本机', d.kind, d.name || d.path, t('成功'), dest || d.path);
           void autoExport(d.path);
         }
       })
@@ -286,6 +404,7 @@ export function useSync() {
     unlisteners.push(
       await listen<{ transfer_id: string }>('sync://request-cancelled', (e) => {
         const tid = e.payload.transfer_id;
+        cancelledTransferIds.add(tid);
         if (activeReceive.value?.transferId === tid) activeReceive.value = null;
         if (requestDialog.value?.transfer_id === tid) requestDialog.value = null;
         if (fpDialog.value?.transfer_id === tid) fpDialog.value = null;
@@ -295,6 +414,7 @@ export function useSync() {
     unlisteners.push(
       await listen<{ transfer_id: string; reason?: string }>('sync://request-timeout', (e) => {
         const tid = e.payload.transfer_id;
+        cancelledTransferIds.add(tid);
         const offline = e.payload.reason === 'offline';
         // 超时/发送方掉线：保留卡片但标记失效，清掉弹层，避免看起来像传输卡住。
         if (activeReceive.value?.transferId === tid) {
@@ -372,6 +492,8 @@ export function useSync() {
       const req = pending[pending.length - 1];
       if (!activeReceive.value || activeReceive.value.id !== req.id) {
         activeReceive.value = buildReceiveTask(req);
+        // 桌面端没有「打开接收页」这个动作，直接补明细；移动端等接收页挂载再拉
+        if (!isMobile.value) void loadReceiveItems();
         if (prompt) {
           if (!req.trusted) fpDialog.value = req;
           else requestDialog.value = req;
@@ -413,23 +535,7 @@ export function useSync() {
   }
 
   async function openReceiveDir() {
-    try {
-      if (isMobile.value) {
-        // 移动端统一走 SAF 目录（与接收页「打开目录」完全同一条路径）：
-        // 应用私有目录需要 FileProvider + resource/folder，卓易通/鸿蒙兼容层
-        // 没有能处理它的应用，会直接弹「暂不支持此功能」；SAF 目录则稳定可开。
-        await api.mobileOpenSavedDir(
-          settings.value.mobile_receive_tree || '',
-          settings.value.mobile_auto_export !== '0',
-        );
-        return;
-      }
-      const dir = status.value?.receive_dir;
-      if (!dir) return;
-      await api.openFolder(dir);
-    } catch (e) {
-      notify(String(e));
-    }
+    await openSavedDir();
   }
 
   function mobileTheme() {
@@ -463,15 +569,6 @@ export function useSync() {
   }
 
   /** 接收后自动保存到可见目录（默认开启） */
-  async function changeAutoExport(enabled: boolean) {
-    settings.value.mobile_auto_export = enabled ? '1' : '0';
-    try {
-      await api.setSetting('mobile_auto_export', enabled ? '1' : '0');
-    } catch (e) {
-      notify(String(e));
-    }
-  }
-
   /** 修改接收导出目录：选择系统文件夹（SAF），之后收到的文件自动复制过去。 */
   async function changeReceiveDir() {
     try {
@@ -494,10 +591,13 @@ export function useSync() {
     try {
       await api.setSetting('mobile_receive_tree', '');
       await api.setSetting('mobile_receive_dir_name', '');
+      // 回读一次：本地赋值只是乐观更新，若写库失败（或别处又写回），界面会立刻暴露真相，
+      // 而不是「恢复默认后还显示原来的目录」。
+      settings.value = await api.getSettings();
     } catch (e) {
       notify(String(e));
     }
-    notify(t('已恢复默认接收位置'));
+    notify(t('已恢复默认接收位置，之后收到的文件保存到「下载/RunHelp」'));
   }
 
   function addReceivedPath(path: string) {
@@ -512,9 +612,10 @@ export function useSync() {
    */
   async function autoExport(path: string) {
     if (!isMobile.value || !path) return;
+    // 不再有「是否自动保存」开关：收到的文件一律复制到用户可见的位置。
+    // 两个落点：用户选的 SAF 文件夹，或系统「下载/RunHelp」。
     const tree = settings.value.mobile_receive_tree || '';
     const dest = receiveDestLabel();
-    if (!tree && settings.value.mobile_auto_export === '0') return;
     try {
       if (tree) {
         await api.mobileExportToDir(tree, [path]);
@@ -541,27 +642,63 @@ export function useSync() {
     if (!isMobile.value) return '';
     const treeName = settings.value.mobile_receive_dir_name;
     if (treeName) return treeName;
-    if (settings.value.mobile_auto_export !== '0') return t('下载/RunHelp');
-    return '';
+    return t('下载/RunHelp');
   }
 
   /**
-   * 打开接收文件所在目录（移动端）：
-   * - 选过 SAF 文件夹 → 直接打开该文件夹
-   * - 自动保存开启 → 打开 系统下载/RunHelp
-   * - 都没开 → 打开应用私有接收目录
-   * 桌面端退化为打开接收目录。
+   * 打开接收文件的所在位置（移动端）。
+   *
+   * 不再让系统文件管理器去开「按路径拼出来的目录 URI」：恢复默认接收位置后目录是
+   * 「下载/RunHelp」，这个 URI 既没授权给我们也不是文件管理器认可的 tree URI，
+   * 鸿蒙/EMUI 上会开出白屏页并卡死（用户手动选一次目录后又正常，正是因为它改走了
+   * 有持久授权的 tree URI）。现在改成应用内列表：SAF 目录直接查子项，默认目录查
+   * MediaStore，点条目打开文件；系统文件管理器只作为次要入口，且只开存储根。
    */
   async function openSavedDir() {
-    try {
-      if (isMobile.value) {
-        await api.mobileOpenSavedDir(
-          settings.value.mobile_receive_tree || '',
-          settings.value.mobile_auto_export !== '0',
-        );
-      } else {
-        await openReceiveDir();
+    if (!isMobile.value) {
+      const dir = status.value?.receive_dir;
+      if (!dir) return;
+      try {
+        await api.openFolder(dir);
+      } catch (e) {
+        notify(String(e));
       }
+      return;
+    }
+    receiveDirOpen.value = true;
+    if (!receiveDirItems.value.length) {
+      receiveDirLoading.value = true;
+      // 先让弹层画出来，再查目录（文件夹几百项时查询本身也要时间）
+      await nextPaint();
+      await loadSavedFiles();
+    }
+  }
+
+  async function loadSavedFiles() {
+    if (!isMobile.value) return;
+    receiveDirLoading.value = true;
+    try {
+      const res = await api.mobileListSavedFiles(settings.value.mobile_receive_tree || '');
+      receiveDirItems.value = markRaw(res.items ?? []);
+      receiveDirLabel.value = res.dir || receiveDestLabel();
+    } catch (e) {
+      notify(String(e));
+    } finally {
+      receiveDirLoading.value = false;
+    }
+  }
+
+  async function openSavedFile(item: { uri: string; mime: string }) {
+    try {
+      await api.mobileOpenSavedFile(item.uri, item.mime || '');
+    } catch (e) {
+      notify(String(e));
+    }
+  }
+
+  async function openInFileManager() {
+    try {
+      await api.mobileOpenFmRoot(settings.value.mobile_receive_tree || '');
     } catch (e) {
       notify(String(e));
     }
@@ -649,6 +786,14 @@ export function useSync() {
     }
     selectedId.value = device.id;
   }
+
+  /**
+   * 等到「真正画过一帧之后再继续」。
+   * 弹层入场是 CSS 过渡，紧接着同步跑一次重 IPC（序列化上百个路径）会占住主线程，
+   * 过渡的第一帧就被吞掉了——这就是「发文件夹时状态页卡一下」的来源。
+   */
+  const nextPaint = () =>
+    new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
 
   function newTransferId() {
     return `x${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -750,7 +895,8 @@ export function useSync() {
     target: SyncDevice,
     kind: 'file' | 'folder',
   ) {
-    const items = paths.map((p, i) => ({ name: displayNames?.[i] ?? basename(p), size: 0 }));
+    // markRaw：文件夹可能几百个条目，没必要让 Vue 深度代理它们（弹层不逐条渲染）
+    const items = markRaw(paths.map((p, i) => ({ name: displayNames?.[i] ?? basename(p), size: 0 })));
     const transferId = newTransferId();
     sendModal.value = {
       transferId,
@@ -764,6 +910,8 @@ export function useSync() {
       total: paths.length,
     };
     sendVisible.value = true;
+    // 先让弹层画完入场动画，再发起（序列化几百个路径 + 后端建清单）
+    await nextPaint();
     await api.syncSendFiles(target.ip, paths, transferId, displayNames ?? undefined);
   }
 
@@ -1105,7 +1253,9 @@ export function useSync() {
   }
 
   function allIndices(req: SyncRequestEvent) {
-    return req.items.map((_, i) => i);
+    // 清单明细已不在事件里，索引按数量推导（后端按 0..count-1 接收）
+    const n = req.items.length || req.count || 0;
+    return Array.from({ length: n }, (_, i) => i);
   }
 
   function requestDecision(req: SyncRequestEvent, indices: number[]) {
@@ -1118,8 +1268,11 @@ export function useSync() {
   }
 
   async function doRespond(req: SyncRequestEvent, indices: number[]) {
+    const content = req.items.length
+      ? req.items.map((i) => i.name).join('、')
+      : t('{count} 个文件', { count: String(req.count || 0) });
     logResult('receive', req.from, status.value?.device_name || '本机', req.kind,
-      req.items.map((i) => i.name).join('、'), indices.length ? t('接收中') : t('拒绝'));
+      content, indices.length ? t('接收中') : t('拒绝'));
     if (fpDialog.value?.id === req.id) fpDialog.value = null;
     if (requestDialog.value?.id === req.id) requestDialog.value = null;
     if (pendingDecision.value?.id === req.id) pendingDecision.value = null;
@@ -1128,6 +1281,10 @@ export function useSync() {
     }
     // 接受后才切到接收页看进度：弹层出现那一刻不切，避免动画掉帧
     if (indices.length) view.value = 'receive';
+    // 应答后后端就把待接收项移出内存了，明细必须在应答前拿到，否则接收页只能空着
+    if (activeReceive.value?.id === req.id && !activeReceive.value.itemsLoaded) {
+      await loadReceiveItems();
+    }
     try {
       await api.syncRespondSelected(req.id, indices);
     } catch (e) {
@@ -1168,9 +1325,9 @@ export function useSync() {
       fingerprint: task.fingerprint,
       trusted: task.trusted,
       kind: task.kind,
-      name: task.items.map((i) => i.name).join(', '),
+      name: task.items.length ? task.items.map((i) => i.name).join(', ') : '',
       size: task.total,
-      count: task.items.length,
+      count: task.itemCount,
       items: task.items.map((i) => ({ name: i.name, size: i.size })),
     };
   });
@@ -1246,9 +1403,12 @@ export function useSync() {
     openAppPicker, loadApps, toggleApp, confirmApps, pickAppEntry,
     load, doRefreshDevices, refreshDevices, pullPending, refreshIncoming, saveName, setReceiveDir, openReceiveDir,
     changeTheme, changeKeepAlive, changeLanguage, changeReceiveDir, resetReceiveDir, receivedPaths,
-    saveReceivedToDownloads, openSavedDir, changeAutoExport,
+    saveReceivedToDownloads, openSavedDir,
+    receiveDirOpen, receiveDirLoading, receiveDirItems, receiveDirLabel,
+    loadSavedFiles, openSavedFile, openInFileManager,
     doPair, toggleFavorite, removeDevice, selectDevice, sendText, pickFiles, cancelSend,
     requestDecision, approveReceive, approveFingerprint, rejectReceive, receiveAllRequests, openIncoming,
     incomingViewReq, fmtSize, kindLabel, platformLabel, shortFp, receiveStageLabel, stageLabel,
+    receiveDestLabel, loadReceiveItems,
   };
 }

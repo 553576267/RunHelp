@@ -53,6 +53,9 @@ import java.util.concurrent.TimeUnit
 
 private const val TAG = "RunHelpMobile"
 
+/** 应用内「接收目录」弹层一次最多列出的文件数（几百项足够，避免弹层自己变卡）。 */
+private const val LIST_LIMIT = 300
+
 /** 相册里的一条媒体（图片或视频） */
 private class MediaRow(
   val uri: Uri,
@@ -479,59 +482,288 @@ class RunhelpMobilePlugin(private val activity: Activity) : Plugin(activity) {
   }
 
   /**
-   * 打开接收文件的落点目录，便于用户在文件管理器里直接找到收到的文件。
-   * 优先用户选的 SAF 文件夹 → 系统下载/RunHelp → 应用私有接收目录。
+   * 接收目录里的一条文件（供应用内「接收目录」弹层展示）。
    */
-  @Command
-  fun openSavedDir(invoke: Invoke) {
-    try {
-      val args = invoke.getArgs()
-      val tree = args.optString("tree", "")
-      val autoExport = !args.has("autoExport") || args.getBoolean("autoExport")
-      // 1) 用户指定的 SAF 文件夹
-      if (tree.isNotBlank()) {
-        val docUri = try {
-          val treeUri = Uri.parse(tree)
-          DocumentsContract.buildDocumentUriUsingTree(treeUri, DocumentsContract.getTreeDocumentId(treeUri))
-        } catch (e: Exception) {
-          Log.w(TAG, "resolve tree uri failed: ${e.message}")
-          null
-        }
-        if (docUri != null && openDocumentDir(docUri)) {
-          invoke.resolve()
-          return
-        }
-      }
-      // 2) 系统「下载/RunHelp」（自动保存的落点），不存在时退到「下载」根目录
-      if (autoExport) {
-        val runhelpDir = Uri.parse("content://com.android.externalstorage.documents/document/primary%3ADownload%2FRunHelp")
-        if (openDocumentDir(runhelpDir)) {
-          invoke.resolve()
-          return
-        }
-        val downloadsRoot = Uri.parse("content://com.android.externalstorage.documents/document/primary%3ADownload")
-        if (openDocumentDir(downloadsRoot)) {
-          invoke.resolve()
-          return
-        }
-      }
-      // 3) 兜底：应用私有接收目录
-      openPrivateReceiveDir()
-      invoke.resolve()
-    } catch (e: Exception) {
-      Log.e(TAG, "openSavedDir failed", e)
-      invoke.reject(e.message ?: "无法打开目录")
-    }
+  private class SavedRow(
+    val name: String,
+    val size: Long,
+    val date: Long,
+    val uri: Uri,
+    val mime: String,
+  )
+
+  private fun SavedRow.toJson(): JSObject = JSObject().apply {
+    put("name", name)
+    put("size", size)
+    put("date", date)
+    put("uri", uri.toString())
+    put("mime", mime)
   }
 
-  /** 用 DocumentsUI 打开一个目录 URI；系统不支持时返回 false 交给上层兜底。 */
-  private fun openDocumentDir(uri: Uri): Boolean {
-    return try {
+  /**
+   * 列出接收目录里的文件，供应用内弹层直接查看。
+   *
+   * 为什么不再打开系统文件管理器：恢复默认接收位置后接收目录是「下载/RunHelp」，
+   * 它只能靠拼 document URI（`document/primary:Download/RunHelp`）去开——这个 URI
+   * 既没授权给我们，也不是 DocumentsUI 认可的 tree URI。鸿蒙/EMUI 的文件管理器
+   * 拿到它会开出一个空白页然后无响应，就是「恢复默认后点打开目录白屏卡死」。
+   * 手动选过一次 SAF 目录后走的是 buildDocumentUriUsingTree + 持久授权，所以又正常。
+   *
+   * 现在改为自己列文件：SAF 目录查子项、默认目录查 MediaStore（Download/RunHelp），
+   * 都是可靠的查询，不再依赖任何拼出来的目录 URI。
+   * 返回 { dir: 目录名, items: [{ name, size, date, uri, mime }] }。
+   */
+  @Command
+  fun listSavedFiles(invoke: Invoke) {
+    val tree = try {
+      invoke.getArgs().optString("tree", "")
+    } catch (_: Exception) {
+      ""
+    }
+    Thread {
+      try {
+        val (label, rows) = resolveSavedFiles(tree)
+        val out = JSObject()
+        out.put("dir", label)
+        val arr = JSArray()
+        for (row in rows) arr.put(row.toJson())
+        out.put("items", arr)
+        invoke.resolveObject(out)
+      } catch (e: Exception) {
+        Log.e(TAG, "listSavedFiles failed", e)
+        invoke.reject(e.message ?: "无法读取接收目录")
+      }
+    }.start()
+  }
+
+  /** 打开接收目录里的某个文件（uri 来自 listSavedFiles，本身带授权或来自 MediaStore）。 */
+  @Command
+  fun openSavedFile(invoke: Invoke) {
+    try {
+      val args = invoke.getArgs()
+      val uri = Uri.parse(args.optString("uri", ""))
+      val mime = args.optString("mime", "").ifBlank { guessMime(uri.lastPathSegment ?: "") }
       val intent = Intent(Intent.ACTION_VIEW).apply {
-        setDataAndType(uri, DocumentsContract.Document.MIME_TYPE_DIR)
+        setDataAndType(uri, mime)
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
       }
+      if (intent.resolveActivity(activity.packageManager) == null) {
+        invoke.reject("系统里没有能打开该文件的应用")
+        return
+      }
+      activity.startActivity(intent)
+      invoke.resolve()
+    } catch (e: Exception) {
+      Log.e(TAG, "openSavedFile failed", e)
+      invoke.reject(e.message ?: "无法打开该文件")
+    }
+  }
+
+  /**
+   * 用系统文件管理器打开接收目录（次要入口）。
+   *
+   * 有 SAF 授权时直接开 tree URI；没有授权时只开恒存在的「内部存储」根，
+   * **绝不拼子目录 URI**——那是白屏的根源。打不开就明确报错，让用户留在应用内查看。
+   */
+  @Command
+  fun openFmRoot(invoke: Invoke) {
+    try {
+      val tree = try {
+        invoke.getArgs().optString("tree", "")
+      } catch (_: Exception) {
+        ""
+      }
+      if (tree.isNotBlank()) {
+        try {
+          val treeUri = Uri.parse(tree)
+          val doc = DocumentsContract.buildDocumentUriUsingTree(
+            treeUri,
+            DocumentsContract.getTreeDocumentId(treeUri),
+          )
+          if (documentExists(doc) && openDocumentDir(doc)) {
+            invoke.resolve()
+            return
+          }
+        } catch (e: Exception) {
+          Log.w(TAG, "open tree dir failed: ${e.message}")
+        }
+      }
+      val root = Uri.parse("content://com.android.externalstorage.documents/root/primary")
+      if (openDocumentDir(root)) {
+        invoke.resolve()
+        return
+      }
+      invoke.reject("系统文件管理器打不开该目录，请直接在应用内查看")
+    } catch (e: Exception) {
+      Log.e(TAG, "openFmRoot failed", e)
+      invoke.reject(e.message ?: "无法打开文件管理器")
+    }
+  }
+
+  /** 解析接收目录：优先 SAF 目录（有授权），否则 MediaStore 的 下载/RunHelp，再退私有目录。 */
+  private fun resolveSavedFiles(tree: String): Pair<String, List<SavedRow>> {
+    if (tree.isNotBlank()) {
+      try {
+        val treeUri = Uri.parse(tree)
+        val treeId = DocumentsContract.getTreeDocumentId(treeUri)
+        val parent = DocumentsContract.buildDocumentUriUsingTree(treeUri, treeId)
+        if (documentExists(parent)) {
+          val label = queryDisplayName(parent) ?: "已选文件夹"
+          return Pair(label, listTreeChildren(treeUri, treeId))
+        }
+      } catch (e: Exception) {
+        Log.w(TAG, "resolve tree for list failed: ${e.message}")
+      }
+    }
+    val media = listDownloadFiles()
+    if (media.isNotEmpty()) return Pair("下载/RunHelp", media)
+    return Pair("应用私有目录", listPrivateFiles())
+  }
+
+  /** 查 SAF 目录下的文件（只列文件，不递归子目录）。 */
+  private fun listTreeChildren(treeUri: Uri, treeId: String): List<SavedRow> {
+    val rows = ArrayList<SavedRow>()
+    val children = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, treeId)
+    activity.contentResolver.query(
+      children,
+      arrayOf(
+        DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+        DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+        DocumentsContract.Document.COLUMN_SIZE,
+        DocumentsContract.Document.COLUMN_LAST_MODIFIED,
+        DocumentsContract.Document.COLUMN_MIME_TYPE,
+      ),
+      null, null, null,
+    )?.use { c ->
+      while (c.moveToNext() && rows.size < LIST_LIMIT) {
+        val mime = c.getString(4) ?: ""
+        if (mime == DocumentsContract.Document.MIME_TYPE_DIR) continue
+        val id = c.getString(0) ?: continue
+        rows.add(
+          SavedRow(
+            name = c.getString(1) ?: "未命名",
+            size = if (c.isNull(2)) 0L else c.getLong(2),
+            date = if (c.isNull(3)) 0L else c.getLong(3),
+            uri = DocumentsContract.buildDocumentUriUsingTree(treeUri, id),
+            mime = mime,
+          ),
+        )
+      }
+    }
+    return rows
+  }
+
+  /** 查 MediaStore 里「下载/RunHelp」的文件（Android 10+ 无需存储权限）。 */
+  private fun listDownloadFiles(): List<SavedRow> {
+    val rows = ArrayList<SavedRow>()
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      val resolver = activity.contentResolver
+      val projection = arrayOf(
+        MediaStore.MediaColumns._ID,
+        MediaStore.MediaColumns.DISPLAY_NAME,
+        MediaStore.MediaColumns.SIZE,
+        MediaStore.MediaColumns.DATE_ADDED,
+        MediaStore.MediaColumns.MIME_TYPE,
+      )
+      val selection = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
+      val args = arrayOf("Download/RunHelp%")
+      val order = "${MediaStore.MediaColumns.DATE_ADDED} DESC"
+      try {
+        resolver.query(MediaStore.Downloads.EXTERNAL_CONTENT_URI, projection, selection, args, order)?.use { c ->
+          while (c.moveToNext() && rows.size < LIST_LIMIT) {
+            val id = c.getLong(0)
+            rows.add(
+              SavedRow(
+                name = c.getString(1) ?: "未命名",
+                size = if (c.isNull(2)) 0L else c.getLong(2),
+                date = if (c.isNull(3)) 0L else c.getLong(3) * 1000L,
+                uri = ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, id),
+                mime = c.getString(4) ?: guessMime(c.getString(1) ?: ""),
+              ),
+            )
+          }
+        }
+      } catch (e: Exception) {
+        Log.w(TAG, "query downloads failed: ${e.message}")
+      }
+    }
+    if (rows.isEmpty()) {
+      // 低版本或 MediaStore 尚未收录（刚写入时可能滞后）：直接扫文件系统
+      val dir = File(
+        android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),
+        "RunHelp",
+      )
+      rows.addAll(listFileDir(dir, "下载/RunHelp"))
+    }
+    return rows
+  }
+
+  /** 应用私有接收目录（SAF/MediaStore 都拿不到内容时的兜底）。 */
+  private fun listPrivateFiles(): List<SavedRow> =
+    listFileDir(File(activity.filesDir, "sync_receive"), "应用私有目录")
+
+  private fun listFileDir(dir: File, label: String): List<SavedRow> {
+    val rows = ArrayList<SavedRow>()
+    if (!dir.isDirectory) return rows
+    val stack = ArrayDeque<File>()
+    stack.addLast(dir)
+    while (stack.isNotEmpty() && rows.size < LIST_LIMIT) {
+      val cur = stack.removeFirst()
+      val children = cur.listFiles() ?: continue
+      children.sortByDescending { it.lastModified() }
+      for (f in children) {
+        if (rows.size >= LIST_LIMIT) break
+        if (f.isDirectory) {
+          stack.addLast(f)
+          continue
+        }
+        val uri = try {
+          FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", f)
+        } catch (e: Exception) {
+          Log.w(TAG, "file provider uri failed for ${f.name}: ${e.message}")
+          continue
+        }
+        rows.add(
+          SavedRow(
+            name = f.name,
+            size = f.length(),
+            date = f.lastModified(),
+            uri = uri,
+            mime = guessMime(f.name),
+          ),
+        )
+      }
+    }
+    if (rows.isEmpty()) Log.i(TAG, "no files listed in $label")
+    return rows
+  }
+
+  /** 该 document URI 在系统里是否真的存在（不存在时 DocumentsUI 会开出白屏）。 */
+  private fun documentExists(uri: Uri): Boolean = try {
+    activity.contentResolver.query(
+      uri, arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID), null, null, null,
+    )?.use { it.count > 0 } ?: false
+  } catch (e: Exception) {
+    Log.w(TAG, "documentExists failed: ${e.message}")
+    false
+  }
+
+  /**
+   * 用 DocumentsUI 打开一个目录 URI；系统里没有能处理它的应用时返回 false 交给上层兜底。
+   * 不再「startActivity 没抛异常就算成功」——那正是白屏的来源：应用被拉起来了但显示不出来。
+   */
+  private fun openDocumentDir(uri: Uri): Boolean {
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+      setDataAndType(uri, DocumentsContract.Document.MIME_TYPE_DIR)
+      addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    if (intent.resolveActivity(activity.packageManager) == null) {
+      Log.w(TAG, "no activity for $uri")
+      return false
+    }
+    return try {
       activity.startActivity(intent)
       true
     } catch (e: Exception) {
@@ -607,34 +839,50 @@ class RunhelpMobilePlugin(private val activity: Activity) : Plugin(activity) {
   }
 
   /**
-   * 系统文件选择器（浏览全部文件用）。
-   * 起点固定为主存储根目录：之前系统默认停在上次用过的位置（常是下载目录），
-   * 用户找不到自己放文件的文件夹。
+   * 系统文件选择器（「文件」入口）。
+   *
+   * 注意：**不要**传 `EXTRA_INITIAL_URI`。系统的文件选择器（DocumentsUI）在没有
+   * initial URI 时会停在「最近」页签，这正是用户想要的入口；之前为了「别停在上次的
+   * 下载目录」硬塞了存储根目录，结果每次都要从根目录一层层翻。需要挑目录的场景走
+   * [`pickFolder`]（那里才用 initial URI 定位到当前接收目录）。
    */
   @Command
   fun pickFiles(invoke: Invoke) {
-    try {
-      val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-        addCategory(Intent.CATEGORY_OPENABLE)
-        type = "*/*"
-        putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-        putExtra(DocumentsContract.EXTRA_INITIAL_URI, storageRootDocumentUri())
-      }
-      startActivityForResult(invoke, intent, "pickFilesResult")
-    } catch (e: Exception) {
-      Log.e(TAG, "pickFiles failed", e)
-      // 个别 ROM 不接受 EXTRA_INITIAL_URI，去掉再试一次
+    // 起始位置按「最近 → 系统默认」降级，不再强制定位到存储根目录：
+    // 用户点「文件」想看的是刚用过的文档，不是一层层翻目录。
+    val attempts = listOfNotNull(
+      openDocumentIntent(recentDocumentsUri()),
+      openDocumentIntent(null),
+    )
+    var lastErr: Exception? = null
+    for (intent in attempts) {
       try {
-        val fallback = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-          addCategory(Intent.CATEGORY_OPENABLE)
-          type = "*/*"
-          putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-        }
-        startActivityForResult(invoke, fallback, "pickFilesResult")
-      } catch (e2: Exception) {
-        invoke.reject(e2.message ?: "无法打开文件选择器")
+        startActivityForResult(invoke, intent, "pickFilesResult")
+        return
+      } catch (e: Exception) {
+        lastErr = e
+        Log.w(TAG, "pickFiles attempt failed: ${e.message}")
       }
     }
+    invoke.reject(lastErr?.message ?: "无法打开文件选择器")
+  }
+
+  private fun openDocumentIntent(initial: Uri?): Intent =
+    Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+      addCategory(Intent.CATEGORY_OPENABLE)
+      type = "*/*"
+      putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+      if (initial != null) putExtra(DocumentsContract.EXTRA_INITIAL_URI, initial)
+    }
+
+  /**
+   * 「最近」视图的 URI：content://<externalstorage>/root/primary/recent。
+   * 部分 ROM（含鸿蒙兼容层）不认识它，会在 pickFiles 里向上抛出并降级到系统默认位置。
+   */
+  private fun recentDocumentsUri(): Uri? = try {
+    DocumentsContract.buildRecentDocumentsUri("com.android.externalstorage.documents", "primary")
+  } catch (_: Exception) {
+    null
   }
 
   @ActivityCallback

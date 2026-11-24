@@ -172,7 +172,7 @@ const {
           <div class="request-meta">
             <span>{{ kindLabel(activeReceive.kind) }}</span>
             <span class="muted">{{ fmtSize(activeReceive.total) }}</span>
-            <span class="muted">{{ activeReceive.items.length }} {{ t('个文件') }}</span>
+            <span class="muted">{{ activeReceive.itemCount }} {{ t('个文件') }}</span>
             <span class="tag" :class="{
               ok: activeReceive.stage === 'done',
               warn: activeReceive.stage === 'rejected',

@@ -113,6 +113,9 @@ export const api = {
   syncSetReceiveDir: (path: string) => call<void>('sync_set_receive_dir', { path }),
   syncListDevices: () => call<import('../types').SyncDevice[]>('sync_list_devices'),
   syncListPending: () => call<import('../types').SyncRequestEvent[]>('sync_list_pending'),
+  // 待接收清单明细：请求事件只带数量，明细在打开接收页时按需拉取
+  syncPendingItems: (transferId: string) =>
+    call<{ name: string; size: number }[]>('sync_pending_items', { transferId }),
   syncPairDevice: (ip: string) =>
     call<import('../types').SyncDevice>('sync_pair_device', { ip }),
   syncSetFavorite: (fingerprint: string, favorite: boolean) =>
@@ -170,6 +173,13 @@ export const api = {
   mobileStartKeepalive: () => call<void>('mobile_start_keepalive'),
   mobileStopKeepalive: () => call<void>('mobile_stop_keepalive'),
   mobileOpenReceiveDir: () => call<void>('mobile_open_receive_dir'),
-  mobileOpenSavedDir: (tree: string, autoExport: boolean) =>
-    call<void>('mobile_open_saved_dir', { tree, autoExport }),
+  /* 应用内「接收目录」：列文件 + 打开单个文件；系统文件管理器只作为次要入口开存储根 */
+  mobileListSavedFiles: (tree: string) =>
+    call<{ dir: string; items: { name: string; size: number; date: number; uri: string; mime: string }[] }>(
+      'mobile_list_saved_files',
+      { tree },
+    ),
+  mobileOpenSavedFile: (uri: string, mime: string) =>
+    call<void>('mobile_open_saved_file', { uri, mime }),
+  mobileOpenFmRoot: (tree: string) => call<void>('mobile_open_fm_root', { tree }),
 };

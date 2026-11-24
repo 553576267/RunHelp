@@ -446,6 +446,12 @@ const en: Record<string, string> = {
   "请先配对目标设备再发送": "Pair the target device before sending",
 
   "个文件": " files",
+  "{count} 个文件": "{count} files",
+  "已接收的文件": "Received files",
+  "这里还没有收到的文件": "No received files here yet",
+  "文件管理器": "File manager",
+  "正在读取文件清单…": "Loading file list…",
+  "已收到来自 {name} 的 {count} 个文件：{path}": "Received {count} files from {name}: {path}",
   "信任并接收": "Trust and receive",
   "双向 TLS 加密传输，对方首次连接时会显示此指纹供你核对": "Two-way TLS encrypted transfer. The fingerprint is shown for verification on first connection",
   "发现不到设备时，输入对方 IP 添加；传输时核对指纹即可建立信任": "If no device is found, add it by IP; verify the fingerprint on transfer to build trust",

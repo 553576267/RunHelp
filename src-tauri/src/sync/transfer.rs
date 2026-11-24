@@ -29,10 +29,20 @@ use super::{
 
 // ===== TLS 流包装：让 rustls 连接像普通 TcpStream 一样 Read/Write =====
 
+/// 单条 keep-alive 连接上最多处理的请求数，防对端异常时长期占用线程。
+const MAX_PIPELINED_REQUESTS: usize = 4096;
+
+/// 批量发送时读文件的块大小（也是进度回调粒度）。
+const SEND_CHUNK: usize = 128 * 1024;
+
 struct TlsStream {
     sock: TcpStream,
     conn: Connection,
     peer_fp: String,
+    /// 本次响应是否保持连接（HTTP/1.1 keep-alive）。
+    /// 批量发文件时一条 TLS 连接上连续发多个请求，省掉每个文件一次握手，
+    /// 这是「发文件夹时状态页持续卡顿」的主因（握手非常吃 CPU）。
+    keep_alive: bool,
 }
 
 impl TlsStream {
@@ -207,10 +217,12 @@ fn read_request(stream: &mut TlsStream) -> Result<Option<HttpRequest>, String> {
 }
 
 fn write_response(stream: &mut TlsStream, status: &str, body: &[u8]) -> Result<(), String> {
+    let connection = if stream.keep_alive { "keep-alive" } else { "close" };
     let head = format!(
-        "HTTP/1.1 {}\r\nContent-Length: {}\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {}\r\nContent-Length: {}\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: {}\r\n\r\n",
         status,
-        body.len()
+        body.len(),
+        connection,
     );
     stream.write_all(head.as_bytes()).map_err(|e| e.to_string())?;
     stream.write_all(body).map_err(|e| e.to_string())?;
@@ -425,6 +437,7 @@ fn handle_connection(sock: TcpStream, config: rustls::ServerConfig, rt: Arc<Sync
         sock,
         conn: Connection::Server(conn),
         peer_fp: String::new(),
+        keep_alive: false,
     };
     stream.handshake()?;
     let peer_fp = stream.peer_fingerprint().to_string();
@@ -435,10 +448,30 @@ fn handle_connection(sock: TcpStream, config: rustls::ServerConfig, rt: Arc<Sync
         .ok()
         .map(|a| a.ip().to_string())
         .unwrap_or_default();
-    let result = match read_request(&mut stream)? {
-        Some(req) => handle_request(&mut stream, req, &rt, &peer_fp, &peer_ip),
-        None => Ok(()),
-    };
+    // 一条连接上可以连续处理多个 /file 请求（发送端批量发送时复用连接）。
+    // 其它端点（/hello、/manifest、/text、/cancel）语义上都是一问一答，处理完即关。
+    let mut result = Ok(());
+    for _ in 0..MAX_PIPELINED_REQUESTS {
+        let req = match read_request(&mut stream) {
+            Ok(Some(req)) => req,
+            Ok(None) => break,
+            Err(e) => {
+                result = Err(e);
+                break;
+            }
+        };
+        let wants_keep = req.path == "/file"
+            && req
+                .header("Connection")
+                .map(|v| !v.eq_ignore_ascii_case("close"))
+                .unwrap_or(false);
+        stream.keep_alive = wants_keep;
+        result = handle_request(&mut stream, req, &rt, &peer_fp, &peer_ip);
+        if result.is_err() || !wants_keep {
+            break;
+        }
+    }
+    stream.keep_alive = false;
     stream.close_notify();
     result
 }
@@ -506,7 +539,7 @@ fn handle_manifest(
         }
         commands::emit_request(
             &request_id, &transfer_id, &from_name, &platform, peer_fp, trusted,
-            &kind, &display_name, total, count, &items,
+            &kind, &display_name, total, count,
         );
         let decision = {
             let alive = || socket_connected(&stream.sock) && !device_gone(rt, peer_fp);
@@ -655,7 +688,7 @@ fn handle_request(stream: &mut TlsStream, req: HttpRequest, rt: &Arc<SyncRuntime
         }
         commands::emit_request(
             &request_id, &transfer_id, &from_name, &platform, peer_fp, trusted,
-            &kind, &name, size, count, &items,
+            &kind, &name, size, count,
         );
 
         let (selected, reason) = {
@@ -886,7 +919,7 @@ fn connect_tls_with(
         rustls::pki_types::ServerName::try_from("runhelp.local").map_err(|e| e.to_string())?,
     )
     .map_err(|e| format!("创建 TLS 客户端连接失败: {}", e))?;
-    let mut stream = TlsStream { sock, conn: Connection::Client(conn), peer_fp: String::new() };
+    let mut stream = TlsStream { sock, conn: Connection::Client(conn), peer_fp: String::new(), keep_alive: false };
     stream.handshake()?;
     Ok(stream)
 }
@@ -911,13 +944,18 @@ fn http_exchange_body(
     let text = String::from_utf8_lossy(&response);
     let status = text.lines().next().unwrap_or("");
     let response_body = text.split("\r\n\r\n").nth(1).unwrap_or("").trim().to_string();
+    classify_response(status, &response_body)
+}
+
+/// 把 HTTP 响应翻译成业务结果（200 成功 / 403 未信任 / 407 拒绝）。
+fn classify_response(status: &str, response_body: &str) -> Result<String, String> {
     if status.contains(" 200 ") {
-        Ok(response_body)
+        Ok(response_body.to_string())
     } else if status.contains(" 403 ") {
         Err("对方尚未信任本机，请先在对方设备确认配对".to_string())
     } else if status.contains(" 407 ") {
         // 响应体区分「明确拒绝 / 发送端撤销 / 超时掉线」，让发送方看到具体原因
-        let msg = match response_body.as_str() {
+        let msg = match response_body {
             "cancelled" => "发送已撤销",
             "timeout" => "对方未在时限内接收（可能已离线）",
             _ => "对方已拒绝接收",
@@ -931,6 +969,83 @@ fn http_exchange_body(
         };
         Err(format!("传输失败: {}{}", status, detail))
     }
+}
+
+/// 写请求头（body 由调用方自己写）。`keep_alive` 决定连接是否复用。
+fn write_request_head(
+    stream: &mut TlsStream,
+    path: &str,
+    headers: &[String],
+    keep_alive: bool,
+) -> Result<(), String> {
+    let mut head = format!(
+        "POST {} HTTP/1.1\r\nHost: runhelp.local\r\nConnection: {}\r\n",
+        path,
+        if keep_alive { "keep-alive" } else { "close" }
+    );
+    for h in headers {
+        head.push_str(h);
+        head.push_str("\r\n");
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes()).map_err(|e| e.to_string())
+}
+
+/// 读一行响应头（到 \n 为止）。对端关闭且没有内容时返回 None。
+fn read_line(stream: &mut TlsStream) -> Result<Option<String>, String> {
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        match stream.read(&mut byte) {
+            Ok(0) => {
+                return Ok(if line.is_empty() {
+                    None
+                } else {
+                    Some(String::from_utf8_lossy(&line).to_string())
+                })
+            }
+            Ok(_) => {
+                if byte[0] == b'\n' {
+                    break;
+                }
+                if byte[0] != b'\r' {
+                    line.push(byte[0]);
+                }
+            }
+            Err(e) => return Err(format!("读取响应失败: {}", e)),
+        }
+    }
+    Ok(Some(String::from_utf8_lossy(&line).to_string()))
+}
+
+/// 读一个响应。按 Content-Length 读 body，不依赖对端关闭连接——
+/// keep-alive 连接上连续发多个请求时这是必需的（read_to_end 会一直等下去）。
+/// 第三个返回值表示对端是否愿意保持连接（老版本服务端会回 `Connection: close`）。
+fn read_response(stream: &mut TlsStream) -> Result<(String, String, bool), String> {
+    let status = read_line(stream)?.ok_or_else(|| "对端已关闭连接".to_string())?;
+    let mut content_len = 0usize;
+    let mut keep = true;
+    loop {
+        let line = read_line(stream)?.ok_or_else(|| "对端提前关闭连接".to_string())?;
+        if line.is_empty() {
+            break;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            let key = k.trim();
+            if key.eq_ignore_ascii_case("Content-Length") {
+                content_len = v.trim().parse().unwrap_or(0);
+            } else if key.eq_ignore_ascii_case("Connection") {
+                keep = !v.trim().eq_ignore_ascii_case("close");
+            }
+        }
+    }
+    let mut body = vec![0u8; content_len];
+    if content_len > 0 {
+        stream
+            .read_exact(&mut body)
+            .map_err(|e| format!("读取响应体失败: {}", e))?;
+    }
+    Ok((status, String::from_utf8_lossy(&body).to_string(), keep))
 }
 
 fn http_exchange(
@@ -1001,27 +1116,93 @@ pub fn send_manifest(
     Ok(parse_selection(&response, items.len()))
 }
 
-/// 发送单个文件；preapproved=true 表示清单阶段已经勾选，不再弹确认。
-pub fn send_file(
+/// 批量发送一组文件：**整批复用一条 TLS 连接**。
+///
+/// 为什么必须这么改：`send_file` 每个文件都新建连接并重新握手（mTLS = 双向证书 +
+/// 签名验证），发一个几百个文件的文件夹就是几百次握手，CPU 被占满几秒，
+/// 手机端表现为「状态页持续卡顿」。这里一次握手发完全部文件，顺带：
+/// - 文件按 128KB 分块读取发送，不再 `fs::read` 整个文件进内存（大视频不再吃双份内存）；
+/// - 每块回调一次进度，由调用方按时间节流后再发事件给前端。
+///
+/// 返回实际发送的总字节数。`on_progress(累计字节, 当前文件已发字节)`。
+///
+/// 兼容旧版本对端：老服务端每个请求回完就关连接（响应带 `Connection: close`），
+/// 这时下一份文件自动重新握手，不会把「新旧混装」的传输搞断。
+pub fn send_files_bulk<F>(
     ip: &str,
     port: u16,
     identity: &Identity,
     from_id: &str,
     from_name: &str,
-    rel_path: &str,
-    data: &[u8],
-    total_count: usize,
+    files: &[(String, std::path::PathBuf)],
     transfer_id: &str,
-    preapproved: bool,
-) -> Result<(), String> {
-    let mut stream = connect_tls(ip, port, identity)?;
-    let mut headers = common_headers(identity, from_id, from_name, "file", transfer_id);
-    headers.push(format!("X-RH-RelPath: {}", url_encode(rel_path)));
-    headers.push(format!("X-RH-Size: {}", data.len()));
-    headers.push(format!("X-RH-Count: {}", total_count));
-    headers.push(format!("X-RH-Preapproved: {}", if preapproved { 1 } else { 0 }));
-    headers.push(format!("Content-Length: {}", data.len()));
-    http_exchange(&mut stream, "/file", &headers, data)
+    cancel: &AtomicBool,
+    on_progress: &mut F,
+) -> Result<u64, String>
+where
+    F: FnMut(u64, u64),
+{
+    if files.is_empty() {
+        return Ok(0);
+    }
+    let count = files.len();
+    let mut stream: Option<TlsStream> = None;
+    let mut buf = vec![0u8; SEND_CHUNK];
+    let mut sent_total: u64 = 0;
+
+    for (rel, path) in files {
+        if cancel.load(Ordering::SeqCst) {
+            return Err("发送已撤销".to_string());
+        }
+        let mut file = std::fs::File::open(path)
+            .map_err(|e| format!("读取 {} 失败: {}", path.display(), e))?;
+        let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let mut headers = common_headers(identity, from_id, from_name, "file", transfer_id);
+        headers.push(format!("X-RH-RelPath: {}", url_encode(rel)));
+        headers.push(format!("X-RH-Size: {}", size));
+        headers.push(format!("X-RH-Count: {}", count));
+        headers.push("X-RH-Preapproved: 1".to_string());
+        headers.push(format!("Content-Length: {}", size));
+
+        if stream.is_none() {
+            let mut fresh = connect_tls(ip, port, identity)?;
+            fresh.keep_alive = true;
+            stream = Some(fresh);
+        }
+        let st = stream.as_mut().expect("stream just ensured");
+        write_request_head(st, "/file", &headers, true)?;
+
+        let mut file_sent: u64 = 0;
+        loop {
+            if cancel.load(Ordering::SeqCst) {
+                return Err("发送已撤销".to_string());
+            }
+            let n = match file.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => return Err(format!("读取 {} 失败: {}", path.display(), e)),
+            };
+            st.write_all(&buf[..n])
+                .map_err(|e| format!("发送 {} 失败: {}", rel, e))?;
+            file_sent += n as u64;
+            sent_total += n as u64;
+            on_progress(sent_total, file_sent);
+        }
+        st.flush().map_err(|e| e.to_string())?;
+        let (status, body, keep) = read_response(st)?;
+        classify_response(&status, &body)?;
+        if !keep {
+            if let Some(mut used) = stream.take() {
+                used.close_notify();
+            }
+        }
+    }
+
+    if let Some(mut s) = stream.take() {
+        s.keep_alive = false;
+        s.close_notify();
+    }
+    Ok(sent_total)
 }
 
 /// 通知对端撤销本次传输。
