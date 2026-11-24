@@ -36,8 +36,8 @@ pub fn parse_shell(raw: &str) -> ShellKind {
 /// 这条 PATH，于是 CreateProcess 直接失败（"系统找不到指定的文件"），
 /// 表现就是命令行里 Git Bash 一切正常、应用内选 Git Bash 一律报错。
 ///
-/// 查找顺序：显式环境变量 → PATH 里的 bash.exe → 由 PATH 里的 git.exe 反推 `<Git>\bin`
-/// → 几个常见安装位置。
+/// 查找顺序：显式环境变量 `RUNHELP_BASH` → 由 PATH 里的 `git.exe` 反推 `<Git>\bin`
+/// → 几个常见安装位置 → 最后才扫 PATH 里的 `bash.exe`（跳过 System32 的 WSL 启动器）。
 pub fn resolve_bash() -> Option<PathBuf> {
     // 便携版 / 非标准安装时可用环境变量指定
     if let Some(p) = std::env::var_os("RUNHELP_BASH").map(PathBuf::from) {
@@ -52,15 +52,9 @@ pub fn resolve_bash() -> Option<PathBuf> {
         .map(|p| std::env::split_paths(p).collect())
         .unwrap_or_default();
 
-    // 1) PATH 里直接有 bash.exe
-    for dir in &dirs {
-        let cand = dir.join("bash.exe");
-        if cand.is_file() {
-            return Some(cand);
-        }
-    }
-
-    // 2) 由 git.exe 反推安装根目录：<Git>\cmd\git.exe → <Git>
+    // 1) 先由 git.exe 反推安装根目录：<Git>\cmd\git.exe → <Git>\bin\bash.exe。
+    //    必须排在"PATH 里直接找 bash.exe"之前：C:\Windows\System32\bash.exe 是 WSL 的
+    //    启动器，不小心命中它会让命令跑进 Linux 子系统，git/路径全都对不上。
     let mut roots: Vec<PathBuf> = Vec::new();
     for dir in &dirs {
         if dir.join("git.exe").is_file() {
@@ -70,7 +64,7 @@ pub fn resolve_bash() -> Option<PathBuf> {
         }
     }
 
-    // 3) 常见安装位置
+    // 2) 常见安装位置
     for base in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
         if let Some(dir) = std::env::var_os(base) {
             let dir = PathBuf::from(dir);
@@ -81,6 +75,18 @@ pub fn resolve_bash() -> Option<PathBuf> {
 
     for root in roots {
         let cand = root.join("bin").join("bash.exe");
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+
+    // 3) 兜底：PATH 里真的直接有 bash.exe（排除 System32，理由同上）
+    for dir in &dirs {
+        let low = dir.to_string_lossy().to_lowercase();
+        if low.contains("system32") {
+            continue;
+        }
+        let cand = dir.join("bash.exe");
         if cand.is_file() {
             return Some(cand);
         }
