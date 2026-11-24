@@ -81,6 +81,25 @@ export interface LogEvent {
   line: string;
 }
 
+/** 日志行语义分类：决定配色与「仅错误」筛选，见 lib/logLine.ts */
+export type LogLineKind =
+  | 'step' // 步骤 N: 执行中
+  | 'step-ok' // 步骤 N 完成: 成功
+  | 'step-bad' // 步骤 N 完成: 失败
+  | 'banner' // ━━━ 开始执行 ━━━
+  | 'banner-ok' // ━━━ 执行完成 · 退出码 0 ━━━
+  | 'banner-bad' // ━━━ 执行失败 / 超时 ━━━
+  | 'banner-stopped' // ━━━ 已停止 ━━━
+  | 'meta' // 解释器 / 执行命令：等标签行
+  | 'echo' // $ 命令回显
+  | 'out' // 进程 stdout / 普通 stderr
+  | 'warn' // 警告
+  | 'err' // 错误
+  | 'info'; // 其它 RunHelp 提示
+
+/** 入队后的日志行：kind 只算一次，渲染直接读 */
+export type LogLine = LogEvent & { kind: LogLineKind };
+
 export interface RunEndEvent {
   run_id: string;
   title: string;

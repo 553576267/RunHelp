@@ -5,7 +5,8 @@ import { getVersion } from '@tauri-apps/api/app';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { api } from './lib/api';
 import { t, setLocale } from './lib/i18n';
-import type { Project, LogEvent, RunEndEvent, RunHistory, SyncRequestEvent } from './types';
+import type { Project, LogEvent, LogLine, RunEndEvent, RunHistory, SyncRequestEvent } from './types';
+import { classifyLog, isErrorLine } from './lib/logLine';
 import ProjectSidebar from './components/ProjectSidebar.vue';
 import CommandCenter from './components/CommandCenter.vue';
 import ImageCompress from './components/ImageCompress.vue';
@@ -17,7 +18,7 @@ const selected = ref<Project | null>(null);
 type MainTab = 'commands' | 'compress' | 'settings' | 'tasks' | 'sync';
 const tab = ref<MainTab>('commands');
 // 数据同步与全局设置一样是「页面级入口」：只切换内容区，不参与页签栏
-const logs = ref<LogEvent[]>([]);
+const logs = ref<LogLine[]>([]);
 const activeRunId = ref<string>('');
 const toast = ref('');
 let toastTimer: number | undefined;
@@ -82,19 +83,12 @@ async function refreshTasks() {
 // 品牌区版本号（与 Cargo.toml 版本一致，无需硬编码）
 const appVersion = ref('');
 
-// 运行日志：错误筛选
+// 运行日志：错误筛选。行的语义（kind）在入队时算一次，这里只读字段，
+// 不再对每行每帧跑正则（日志上限 1200 行时那部分是纯浪费）
 const onlyErrors = ref(false);
-const ERROR_RE = /(?:error|exception|traceback|fatal|failed|failure|denied|refused|unhandled|cannot|invalid|not found|timeout|timed out|npm ERR|ERR!|错误|异常|失败|拒绝|无法|不存在|未找到|超时|致命)/i;
-function isErrorLog(l: LogEvent): boolean {
-  if (/^━━━ 【RunHelp】/.test(l.line)) {
-    // 结束横幅：失败/超时标红；开始横幅与解释器行不标红
-    return /执行失败|执行超时|failed|timeout/i.test(l.line);
-  }
-  return l.stream === 'stderr' && ERROR_RE.test(l.line);
-}
-const errorCount = computed(() => logs.value.filter(isErrorLog).length);
+const errorCount = computed(() => logs.value.filter((l) => isErrorLine(l.kind)).length);
 const visibleLogs = computed(() =>
-  onlyErrors.value ? logs.value.filter(isErrorLog) : logs.value
+  onlyErrors.value ? logs.value.filter((l) => isErrorLine(l.kind)) : logs.value
 );
 
 // 窗口尺寸变化期间禁用过渡/动画，减轻最大化切小窗口时的闪屏
@@ -393,8 +387,10 @@ async function togglePauseRun(r: import('./types').RunningInfo) {
 
 // 统一追加日志：根据跟随状态决定滚到底还是累计未读，再做限流裁剪。
 // 裁剪时补偿 scrollTop，避免用户正在翻历史时因删除旧行导致视口跳变。
-function appendLogs(lines: LogEvent[]) {
-  if (!lines.length) return;
+function appendLogs(input: (LogEvent | LogLine)[]) {
+  if (!input.length) return;
+  // 语义分类只在这里跑一次；已带 kind 的（由 run://end 精确指定）原样保留
+  const lines = input.map((l) => ('kind' in l ? (l as LogLine) : { ...l, kind: classifyLog(l) }));
   const el = consoleBody.value;
   // 暂停跟随时记录裁剪前状态，裁剪后用像素差补偿 scrollTop，保证视口内容不跳
   const compensate = !isFollowing.value && el && logs.value.length + lines.length > 1200;
@@ -425,7 +421,7 @@ function handleLog(e: LogEvent) {
 }
 
 function handleRunEnd(e: RunEndEvent) {
-  const incoming: LogEvent[] = [];
+  const incoming: (LogEvent | LogLine)[] = [];
   // 兜底：把进程捕获到的 stderr 补进日志（流式可能已推送过，做去重）。
   if (e.stderr) {
     for (const line of e.stderr.split('\n')) {
@@ -446,6 +442,12 @@ function handleRunEnd(e: RunEndEvent) {
     stopped: t('已停止'),
   };
   const secs = (e.duration_ms / 1000).toFixed(1);
+  // 成败这里已经确定（e.status），直接给定 kind，比回头解析横幅文字可靠
+  const endKind = e.status === 'success'
+    ? 'banner-ok'
+    : e.status === 'stopped'
+      ? 'banner-stopped'
+      : 'banner-bad';
   incoming.push({
     run_id: e.run_id,
     stream: 'info',
@@ -454,6 +456,7 @@ function handleRunEnd(e: RunEndEvent) {
       exitCode: e.exit_code,
       secs,
     }),
+    kind: endKind,
   });
   appendLogs(incoming);
   void maybeNotifySuccess(e);
@@ -769,8 +772,8 @@ onUnmounted(() => {
               v-for="(l, i) in visibleLogs"
               :key="i"
               class="log-line"
-              :class="{ 'is-error': isErrorLog(l) }"
-            >{{ l.line }}</div>
+              :class="l.kind"
+            ><span v-if="l.kind === 'echo'" class="prompt">$</span>{{ l.kind === 'echo' ? l.line.slice(1) : l.line }}</div>
           </div>
           <!-- 暂停跟随时浮出的"跳到最新"，点击恢复自动滚动 -->
           <button
@@ -917,12 +920,36 @@ onUnmounted(() => {
   box-shadow: 0 2px 8px rgba(0, 0, 0, .25);
 }
 .jump-latest:hover { background: var(--accent-hover); }
+/* 日志配色：颜色是信号，不给每行都上色。
+   三级层次——命令/正文（亮）＞ 输出（中）＞ 标签与解释器（暗）；
+   语义色只用于步骤、run 开始/结束、警告与错误。全部走主题变量，浅色自动跟随。 */
 .log-line { white-space: pre-wrap; word-break: break-all; color: var(--text-1); }
-.log-line.stdout { color: var(--text-0); }
-.log-line.stderr { color: var(--text-1); }
+.log-line.out { color: var(--text-1); }
 .log-line.info { color: var(--accent); }
-/* 只有判定为错误的日志才标红，避免正常输出（如 npm 进度写 stderr）被误标 */
-.log-line.is-error { color: var(--danger); }
+/* 解释器路径、执行命令/执行结果这类标签行：只交代结构，压到最暗 */
+.log-line.meta { color: var(--text-2); }
+.log-line.echo { color: var(--text-0); font-weight: 500; }
+.prompt { color: var(--accent); }
+.log-line.warn { color: var(--warn); }
+.log-line.err { color: var(--danger); }
+/* 步骤：流水线的一级小节，留出上间距形成分组 */
+.log-line.step { color: var(--accent); font-weight: 500; margin-top: 8px; }
+.log-line.step-ok { color: var(--success); }
+.log-line.step-bad { color: var(--danger); }
+/* run 横幅：左侧竖条 + 上下留白，把一次执行夹成一个"块"；不要做成整行底色，那会太重 */
+.log-line.banner,
+.log-line.banner-ok,
+.log-line.banner-bad,
+.log-line.banner-stopped {
+  margin: 8px 0 4px;
+  padding-left: 8px;
+  border-left: 3px solid var(--accent);
+  font-weight: 500;
+  color: var(--text-0);
+}
+.log-line.banner-ok { border-left-color: var(--success); color: var(--success); }
+.log-line.banner-bad { border-left-color: var(--danger); color: var(--danger); }
+.log-line.banner-stopped { border-left-color: var(--text-2); color: var(--text-1); }
 .history-row { display: flex; align-items: center; gap: 10px; padding: 6px 2px; border-bottom: 1px solid var(--border-soft); font-size: 12px; }
 .history-target { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-2); flex-shrink: 0; }
