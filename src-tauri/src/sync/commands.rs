@@ -770,30 +770,35 @@ pub fn sync_send_files(
                     let conn = AppState::open_db_for_sync().ok_or("数据库未就绪")?;
                     (super::device_id(&conn), super::display_name(&conn))
                 };
+                // 移动端的 paths 是 content:// 复制到 cacheDir 后的本地副本，文件名可能被
+                // uniqueFile 加了 _1/_2 后缀；真正要展示、落盘的名字由前端通过 names 传进来。
+                // 这里必须用同一个名字做「清单 + 传输 rel path」，否则接收端按名字匹配不上清单项，
+                // 表现为「发送方显示完成、接收方永远卡在接收中」（实际文件已经落盘）。
+                let display_names = names.unwrap_or_default();
+                let use_display_names = !display_names.is_empty() && display_names.len() == paths.len();
                 let mut files: Vec<(String, PathBuf)> = Vec::new();
-                for p in &paths {
+                for (idx, p) in paths.iter().enumerate() {
                     let path = PathBuf::from(p);
                     if path.is_dir() {
                         let base = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "folder".to_string());
                         collect_files(&path, &base, &mut files)?;
                     } else if path.is_file() {
-                        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".to_string());
-                        files.push((name, path));
+                        let base = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".to_string());
+                        let rel = match display_names.get(idx) {
+                            Some(n) if use_display_names && !n.trim().is_empty() => n.trim().to_string(),
+                            _ => base,
+                        };
+                        files.push((rel, path));
                     }
                 }
                 if files.is_empty() {
                     return Err("没有可发送的文件".to_string());
                 }
-                let display_names = names.unwrap_or_default();
+                // items 直接取 files 的 rel：清单与后续 /file 请求天然同名，不会错位。
                 let items: Vec<super::PendingItem> = files
                     .iter()
-                    .enumerate()
-                    .map(|(i, (name, path))| super::PendingItem {
-                        name: if display_names.get(i).map(|n| !n.is_empty()).unwrap_or(false) {
-                            display_names[i].clone()
-                        } else {
-                            name.clone()
-                        },
+                    .map(|(rel, path)| super::PendingItem {
+                        name: rel.clone(),
                         size: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
                     })
                     .collect();

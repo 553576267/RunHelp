@@ -1126,6 +1126,7 @@ class RunhelpMobilePlugin(private val activity: Activity) : Plugin(activity) {
       val uris = if (args.has("uris")) JSArray(args.getJSONArray("uris").toString()) else JSArray()
       val outDir = File(activity.cacheDir, "sync_send")
       if (!outDir.exists()) outDir.mkdirs()
+      pruneOldCache(outDir)
       val result = JSArray()
       for (i in 0 until uris.length()) {
         val uriStr = uris.getString(i) ?: continue
@@ -1230,6 +1231,23 @@ class RunhelpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     }
     // 回退：从 URI 末段取名字
     return uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+  }
+
+  /**
+   * 清理一天前的发送缓存。缓存只用来给 Rust 侧读字节，展示名与对端落盘名都取原始文件名，
+   * 所以旧副本没有保留价值；不清的话每次重发同名文件都会多出一份 `xxx_1.jpg`。
+   */
+  private fun pruneOldCache(dir: File) {
+    val cutoff = System.currentTimeMillis() - 24L * 60 * 60 * 1000
+    dir.listFiles()?.forEach { f ->
+      if (f.lastModified() < cutoff) {
+        try {
+          if (f.isDirectory) f.deleteRecursively() else f.delete()
+        } catch (e: Exception) {
+          Log.w(TAG, "prune sync_send cache failed: ${e.message}")
+        }
+      }
+    }
   }
 
   private fun uniqueFile(dir: File, name: String): File {

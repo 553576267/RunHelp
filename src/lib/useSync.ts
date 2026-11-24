@@ -43,6 +43,8 @@ export interface ReceiveTask {
   itemCount: number;
   /** 明细是否已拉取 */
   itemsLoaded: boolean;
+  /** 已落盘的文件数：完成判定按数量兜底，不依赖文件名与清单项一一匹配 */
+  receivedCount: number;
   /** 接收页未打开时也累计进度，用于百分比 */
   receivedBytes: number;
   /** 每个文件上一次上报的已收字节，用于把进度换算成增量 */
@@ -214,6 +216,7 @@ export function useSync() {
       items: inline.map((item) => ({ name: item.name, size: item.size, received: 0, status: 'pending' })),
       itemCount: req.count || inline.length,
       itemsLoaded: inline.length > 0,
+      receivedCount: 0,
       receivedBytes: 0,
       progressByName: {},
       stage: 'incoming',
@@ -329,8 +332,12 @@ export function useSync() {
           task.receivedBytes += nextBytes - prev;
           task.progressByName[d.name] = nextBytes;
         }
-        // 明细未加载时没有行可画，逐项更新可以整段跳过
-        if (!task.items.length) return;
+        // 明细未加载时没有行可画，逐项更新可以整段跳过；
+        // 但字节已经收满时必须收尾，否则明细一直不来就会永远停在「接收中」。
+        if (!task.items.length) {
+          if (task.total > 0 && task.receivedBytes >= task.total) task.stage = 'done';
+          return;
+        }
         const item = task.items.find((i) => i.name === d.name);
         if (!item) return;
         if (d.status === 'done') {
@@ -348,9 +355,19 @@ export function useSync() {
         const d = e.payload;
         const task = activeReceive.value;
         if (task) {
-          const item = task.items.find((i) => i.name === d.name) ?? task.items[0];
+          // 完成判定不能只靠「文件名和清单项对上」：发送端 rel path 与清单展示名
+          // 一旦不一致（历史上就是缓存重名加 _1 后缀），清单项永远等不到自己的
+          // done 事件，界面会一直停在「接收中」，而文件其实已经全部落盘。
+          // 所以按「已收文件数 ≥ 清单条目数」兜底收尾。
+          if (d.kind === 'file') task.receivedCount += 1;
+          const item = task.items.find((i) => i.name === d.name)
+            ?? task.items.find((i) => i.status !== 'done');
           if (item) { item.received = item.size; item.status = 'done'; }
-          if (task.items.length && task.items.every((i) => i.status === 'done')) task.stage = 'done';
+          const expected = task.items.length || task.itemCount;
+          const allItemsDone = task.items.length > 0 && task.items.every((i) => i.status === 'done');
+          if (expected > 0 && (allItemsDone || task.receivedCount >= expected)) task.stage = 'done';
+          // 文字/剪贴板是一问一答，没有逐项进度，收到即完成
+          if (d.kind === 'text' || d.kind === 'clipboard') task.stage = 'done';
         }
         if (d.kind === 'text' || d.kind === 'clipboard') {
           try {
