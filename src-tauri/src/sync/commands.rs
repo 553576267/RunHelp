@@ -270,8 +270,7 @@ pub fn emit_request_timeout(transfer_id: &str, reason: &str) {
 }
 
 /// 接收进度事件（供接收方 UI 显示进度条）
-pub fn emit_receive_progress(name: &str, received: u64, total: u64, status: &str) {
-    if let Some(app) = AppState::app_handle_for_sync() {
+pub fn emit_receive_progress(name: &str, received: u64, total: u64, status: &str) {    if let Some(app) = AppState::app_handle_for_sync() {
         let _ = app.emit(
             "sync://receive-progress",
             serde_json::json!({
@@ -279,6 +278,61 @@ pub fn emit_receive_progress(name: &str, received: u64, total: u64, status: &str
             }),
         );
     }
+}
+
+/// 记录一条设备上下线诊断日志。
+///
+/// 两个去处：① `state_log` 环形缓冲（同步页「设备日志」直接看，可滚动/截图）；
+/// ② 运行日志面板（`run://log`），便于和设备收发日志放在一起看。
+///
+/// 排查「设备在离线和在线之间来回切」时，仅凭界面无法知道是谁判的：
+/// 广播超时 / 探测连续失败 / 手动刷新一次即判 / BYE / 扫描兜底过期，
+/// 这几种成因的处理方式完全不同，所以每行都带原因和两个时间戳的年龄。
+pub fn note_state(rt: &SyncRuntime, level: &str, device: &str, line: String) {
+    push_state_log(rt, level, device, line, true);
+}
+
+/// 只进环形缓冲、不进运行日志面板的明细行（例如「探测未应答 1/3」）。
+/// 这类行在设备持续抖动时可能每 2 秒一条，直接灌进日志面板会把有用的上下文冲掉。
+pub fn note_state_detail(rt: &SyncRuntime, level: &str, device: &str, line: String) {
+    push_state_log(rt, level, device, line, false);
+}
+
+fn push_state_log(rt: &SyncRuntime, level: &str, device: &str, line: String, mirror: bool) {
+    if let Ok(mut log) = rt.state_log.lock() {
+        if log.len() >= super::STATE_LOG_CAP {
+            log.pop_front();
+        }
+        log.push_back(super::StateLogEntry {
+            ts: super::now_secs(),
+            level: level.to_string(),
+            device: device.to_string(),
+            line: line.clone(),
+        });
+    }
+    if !mirror {
+        return;
+    }
+    if let Some(app) = AppState::app_handle_for_sync() {
+        let _ = app.emit(
+            "run://log",
+            crate::models::LogEvent {
+                // 独立 run_id：前端日志面板按行显示，和项目流水线的 run_id 区分开
+                run_id: "sync-device".to_string(),
+                stream: if level == "warn" { "stderr" } else { "info" }.to_string(),
+                line,
+            },
+        );
+    }
+}
+
+/// 读取设备状态诊断日志（最近的在后）。limit 为 0 时返回全部。
+#[tauri::command]
+pub fn sync_state_log(app: tauri::AppHandle, limit: usize) -> Result<Vec<super::StateLogEntry>, String> {
+    let runtime = rt(&app);
+    let log = runtime.state_log.lock().map_err(|e| e.to_string())?;
+    let take = if limit == 0 { log.len() } else { limit.min(log.len()) };
+    Ok(log.iter().skip(log.len() - take).cloned().collect())
 }
 
 /// 启动同步服务（发现 + HTTP 接收）
@@ -957,11 +1011,23 @@ pub fn start_recent_liveness(app: tauri::AppHandle) {
         .ok();
 }
 
+/// `probe_inflight` 的复位守卫：探测线程无论正常结束、提前 return 还是 panic，
+/// 都必须把标志放开。曾经只在函数末尾 store(false)，一次异常就会把标志永久留在 true，
+/// 之后所有探测都被 `compare_exchange` 挡掉，设备状态从此停住不动。
+struct InflightGuard(Arc<SyncRuntime>);
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.0.probe_inflight.store(false, Ordering::SeqCst);
+    }
+}
+
 /// 主动探测最近连接过的设备（最多 limit 台），立即判定在线/离线。
 /// 探测放到后台线程异步执行，command 立即返回候选数量，绝不阻塞调用线程/IPC worker。
 /// 手动/页面打开调用 notify_always=true；后台存活探测用 false，仅在状态变化时发事件。
 /// `strict`：手动刷新时启用——一次不应答就判离线（LocalSend 的手动刷新语义：
-/// 「没应答的设备就是不可达」，用户点了刷新要立刻看到真实结果，而不是等两次失败计数）。
+/// 「没应答的设备就是不可达」，用户点了刷新要立刻看到真实结果，而不是等三次失败计数）。
+/// 手动刷新用更宽的握手超时（probe_manual），避免弱信号下一次超时就误判。
 fn probe_recent_async(app: &tauri::AppHandle, limit: usize, notify_always: bool, strict: bool) -> usize {
     let runtime = rt(app);
     // 页面打开、手动刷新、后台存活探测可能同时触发；同一时刻只跑一轮，避免重复握手。
@@ -1010,9 +1076,12 @@ fn probe_recent_async(app: &tauri::AppHandle, limit: usize, notify_always: bool,
     };
     // 广播发现但还没入库的设备（第一次见、没建立信任）也要探活，
     // 否则它们只能等广播超时，离线感知明显比上线慢。
+    // 仅靠网段扫描发现的设备（probe_only）**必须**一起探：
+    // 它们没有广播心跳，以前被跳过，只能靠 15 秒一次的扫描续命，
+    // 而兜底超时是 12 秒 —— 于是每 15 秒必然闪一次「离线」再自己回来。
     if let Ok(devices) = runtime.devices.lock() {
         for d in devices.values() {
-            if d.ip.is_empty() || d.probe_only {
+            if d.ip.is_empty() {
                 continue;
             }
             if candidates
@@ -1040,6 +1109,8 @@ fn probe_recent_async(app: &tauri::AppHandle, limit: usize, notify_always: bool,
     let changed = Arc::new(AtomicBool::new(false));
     // 关键：spawn 后立即返回；join 全在后台线程内完成，不占用同步 command 的 worker。
     std::thread::spawn(move || {
+        // 无论怎么退出（包括 panic）都复位探测锁，避免一次异常把探测永久卡死。
+        let _inflight = InflightGuard(runtime.clone());
         let identity = runtime.identity.clone();
         let handles: Vec<_> = candidates
             .into_iter()
@@ -1054,49 +1125,108 @@ fn probe_recent_async(app: &tauri::AppHandle, limit: usize, notify_always: bool,
                     // 单台设备的结果立刻落到运行时并**立刻推事件**。
                     // 之前要等整轮 join 之后才重算并发事件：只要列表里有一台手机被系统冻结
                     // （TCP 连得上、应用层不应答），整轮就被它拖住，其它设备的上下线也一起延迟。
+                    let started = Instant::now();
                     let mut flipped = false;
-                    match transfer::probe_liveness(&ip, super::TRANSFER_PORT, &identity, &self_id, &self_name) {
+                    // 失败计数按设备 id 记：指纹可能为空（旧版本对端），
+                    // 用空串当 key 会让所有这类设备共用同一个计数器，一台失败把另一台也带成离线。
+                    let miss_key = if !id.is_empty() {
+                        id.clone()
+                    } else if !fp.is_empty() {
+                        fp.clone()
+                    } else {
+                        ip.clone()
+                    };
+                    // 手动刷新用更宽的超时：用户点一下应该得到「真实但别误判」的结果，
+                    // 600ms/900ms 是给 2 秒一轮的后台探测省射频的，手动场景等 1.2s 完全可接受。
+                    let probe_result = if strict {
+                        transfer::probe_manual(&ip, super::TRANSFER_PORT, &identity, &self_id, &self_name)
+                    } else {
+                        transfer::probe_liveness(&ip, super::TRANSFER_PORT, &identity, &self_id, &self_name)
+                    };
+                    match probe_result {
                         Ok(info) => {
+                            let rtt = started.elapsed().as_millis() as u64;
                             let use_id = if info.id.is_empty() { id } else { info.id };
                             let use_fp = if info.fingerprint.is_empty() { fp } else { info.fingerprint };
                             // 探测成功即清零失败计数；原本离线的设备要通知前端立刻刷新。
                             if let Ok(mut misses) = rt.probe_misses.lock() {
+                                misses.remove(&miss_key);
                                 misses.remove(&use_fp);
                             }
                             let was_online = rt.devices.lock().ok()
                                 .and_then(|devices| devices.values()
-                                    .find(|d| d.fingerprint == use_fp)
+                                    .find(|d| (!use_fp.is_empty() && d.fingerprint == use_fp) || d.ip == ip)
                                     .map(|d| d.online))
                                 .unwrap_or(false);
-                            discovery::upsert_device_probe(
+                            let outcome = discovery::upsert_device_probe(
                                 &rt, use_id,
                                 if info.name.is_empty() { name } else { info.name },
                                 if info.platform.trim().is_empty() { "unknown".to_string() } else { info.platform },
-                                ip, super::TRANSFER_PORT, use_fp,
+                                ip.clone(), super::TRANSFER_PORT, use_fp,
                             );
                             if !was_online {
                                 flipped = true;
+                                // 上线原因写清楚：探测成功说明「应用层应答了」，比 TCP 连通更可信
+                                note_state(
+                                    &rt, "info", &outcome.name,
+                                    format!("[设备] {} 上线 · 探测成功 {}ms · ip {}",
+                                        outcome.name, rtt, outcome.ip),
+                                );
                             }
                         }
-                        Err(_) => {
+                        Err(err) => {
+                            // 判定前先留现场：界面是否还显示在线、两个时间戳各自多久没刷新。
+                            // 这是区分「信号真丢了」和「判据写错了」的唯一线索。
+                            let now = super::now_secs();
+                            let snapshot = rt.devices.lock().ok().and_then(|devices| {
+                                devices.values()
+                                    .find(|d| {
+                                        (!fp.is_empty() && d.fingerprint == fp)
+                                            || d.last_ip == ip || d.ip == ip
+                                    })
+                                    .map(|d| (d.name.clone(), d.online, d.last_seen, d.last_probe))
+                            });
+                            let (dev_name, was_online, hb_ts, probe_ts) = snapshot
+                                .unwrap_or((name.clone(), false, 0, 0));
+                            let hb_desc = super::age_desc(now, hb_ts);
+                            let probe_desc = super::age_desc(now, probe_ts);
                             // 连续失败达到阈值才判离线，避免单次握手抖动造成设备闪断。
+                            let mut misses_now = 0u8;
                             let mut mark_offline = false;
                             if strict {
                                 // 手动刷新：不应答即离线，追求「点一下就是真实状态」。
                                 if let Ok(mut misses) = rt.probe_misses.lock() {
-                                    misses.remove(&fp);
+                                    misses.remove(&miss_key);
                                 }
+                                misses_now = super::PROBE_OFFLINE_MISSES;
                                 mark_offline = true;
                             } else if let Ok(mut misses) = rt.probe_misses.lock() {
-                                let n = misses.entry(fp.clone()).or_insert(0);
+                                let n = misses.entry(miss_key.clone()).or_insert(0);
                                 *n = n.saturating_add(1);
+                                misses_now = *n;
                                 if *n >= super::PROBE_OFFLINE_MISSES {
                                     *n = 0;
                                     mark_offline = true;
                                 }
                             }
+                            // 只对「界面还显示在线」的失败记一行：真正离线的设备每 2 秒都会失败，
+                            // 全记下来会把有价值的上下文冲掉。
+                            if was_online && !mark_offline {
+                                note_state_detail(
+                                    &rt, "warn", &dev_name,
+                                    format!(
+                                        "[设备] {} 探测未应答 {}/{} · {} · 心跳 {} / 探测 {}",
+                                        dev_name, misses_now, super::PROBE_OFFLINE_MISSES, err, hb_desc, probe_desc
+                                    ),
+                                );
+                            }
                             if mark_offline {
-                                let now = super::now_secs();
+                                let reason = if strict {
+                                    format!("手动刷新探测未应答，一次即判离线（{}）", err)
+                                } else {
+                                    format!("连续 {} 次探测失败（{}）", super::PROBE_OFFLINE_MISSES, err)
+                                };
+                                let mut offline_line: Option<String> = None;
                                 if let Ok(mut devices) = rt.devices.lock() {
                                     if let Some(d) = devices.values_mut().find(|d| {
                                         (!fp.is_empty() && d.fingerprint == fp)
@@ -1111,8 +1241,15 @@ fn probe_recent_async(app: &tauri::AppHandle, limit: usize, notify_always: bool,
                                             d.last_seen = 0;
                                             d.last_probe = 0;
                                             flipped = true;
+                                            offline_line = Some(format!(
+                                                "[设备] {} 离线 · {} · 心跳 {} / 探测 {} · ip {}",
+                                                d.name, reason, hb_desc, probe_desc, d.ip
+                                            ));
                                         }
                                     }
+                                }
+                                if let Some(line) = offline_line {
+                                    note_state(&rt, "warn", &dev_name, line);
                                 }
                             }
                         }
@@ -1132,29 +1269,54 @@ fn probe_recent_async(app: &tauri::AppHandle, limit: usize, notify_always: bool,
         let state_changed = {
             let now = super::now_secs();
             let mut flipped = false;
+            let mut went_offline: Vec<(String, String, String, String, bool)> = Vec::new();
             if let Ok(mut devices) = runtime.devices.lock() {
                 for d in devices.values_mut() {
                     let online = d.is_online(now);
                     if online != d.online {
                         d.online = online;
                         flipped = true;
+                        if !online {
+                            went_offline.push((
+                                d.name.clone(),
+                                d.ip.clone(),
+                                super::age_desc(now, d.last_seen),
+                                super::age_desc(now, d.last_probe),
+                                d.probe_only,
+                            ));
+                        }
                     }
                 }
+            }
+            for (name, ip, hb, pr, probe_only) in went_offline {
+                note_state(
+                    &runtime, "warn", &name,
+                    format!(
+                        "[设备] {} 离线 · 广播与探测时间戳都过期（{}）· 心跳 {} / 探测 {} · ip {}",
+                        name,
+                        if probe_only { "仅扫描发现" } else { "常规" },
+                        hb,
+                        pr,
+                        ip
+                    ),
+                );
             }
             flipped
         };
         if notify_always || changed.load(Ordering::SeqCst) || state_changed {
             let _ = app_bg.emit("sync://devices-updated", ());
         }
-        runtime.probe_inflight.store(false, Ordering::SeqCst);
     });
     count
 }
 
 /// 主动探测最近连接过的设备（Tauri 命令入口）。
+/// `strict`：手动下拉刷新传 true（一次不应答即判离线）；页面打开传 false，
+/// 否则「一进同步页」就用了最激进的判据，弱信号下一次 600ms 超时就把设备判成离线，
+/// 2 秒后后台探测又成功 —— 用户看到的就是「进页面先闪一下」。
 #[tauri::command]
-pub fn sync_probe_recent(app: tauri::AppHandle, limit: usize) -> Result<usize, String> {
-    Ok(probe_recent_async(&app, limit, true, true))
+pub fn sync_probe_recent(app: tauri::AppHandle, limit: usize, strict: Option<bool>) -> Result<usize, String> {
+    Ok(probe_recent_async(&app, limit, true, strict.unwrap_or(false)))
 }
 
 /// 把同步结果写入运行日志（桌面端日志面板可见）。

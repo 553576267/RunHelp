@@ -174,8 +174,15 @@ export interface SyncDevice {
   online: boolean;
 }
 
-export interface SyncStatus {
-  device_id: string;
+/// 设备上下线诊断日志：排查「设备离线/上线来回切」时看判定原因
+export interface SyncStateLog {
+  ts: number;
+  level: string;
+  device: string;
+  line: string;
+}
+
+export interface SyncStatus {  device_id: string;
   device_name: string;
   fingerprint: string;
   fingerprint_short: string;

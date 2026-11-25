@@ -140,7 +140,12 @@ export const api = {
   syncClearHistory: () => call<void>('sync_clear_history'),
   syncRegenerateIdentity: () => call<string>('sync_regenerate_identity'),
   syncLogResult: (payload: Record<string, string>) => call<void>('sync_log_result', { payload }),
-  syncProbeRecent: (limit: number) => call<number>('sync_probe_recent', { limit }),
+  // strict：手动下拉刷新为 true（一次不应答即判离线）；页面打开传 false，避免一进页面就闪
+  syncProbeRecent: (limit: number, strict = false) =>
+    call<number>('sync_probe_recent', { limit, strict }),
+  // 设备上下线诊断日志（含判定原因与两个时间戳的年龄）
+  syncStateLog: (limit: number) =>
+    call<import('../types').SyncStateLog[]>('sync_state_log', { limit }),
   appIsMobile: () => call<boolean>('app_is_mobile'),
   // 移动端把 content:// URI 解析为可读文件路径；桌面端原样返回。
   mobileResolveUris: (uris: string[]) =>

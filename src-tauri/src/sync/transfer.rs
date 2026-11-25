@@ -824,6 +824,21 @@ pub fn probe_liveness(
     probe_inner(ip, port, identity, self_id, self_name, 600, 900)
 }
 
+/// 手动刷新专用探测：用户主动点的，多等 1 秒完全可接受，换来更少的误判。
+///
+/// 手动刷新是「一次不应答即判离线」（strict），如果还用后台那套 600ms/900ms，
+/// 手机 Wi-Fi 省电或刚好在传大文件时会握手超时，于是点一下刷新设备就变离线，
+/// 两秒后后台探测成功又上线 —— 这正是用户看到的「刷新一下就闪」。
+pub fn probe_manual(
+    ip: &str,
+    port: u16,
+    identity: &Identity,
+    self_id: &str,
+    self_name: &str,
+) -> Result<ProbeInfo, String> {
+    probe_inner(ip, port, identity, self_id, self_name, 1_200, 1_500)
+}
+
 /// /hello 探测结果。platform 必须一起带回来，否则探测路径只能填 "unknown"，
 /// 会出现「设备类型偶尔变成 unknown」（广播没到时被探测值覆盖）。
 #[derive(Clone, Debug, Default)]

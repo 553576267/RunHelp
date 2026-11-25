@@ -31,20 +31,29 @@ pub const DISCOVERY_MAGIC: &str = "RUNHELP1";
 /// 注意别等于 LIVENESS_INTERVAL_SECS，否则超时判定与探测刷新卡在同一秒边界会抖。
 pub const DEVICE_TIMEOUT_SECS: i64 = 4;
 /// 只靠网段扫描发现的设备（没有广播心跳）的兜底超时。
-/// 这类设备每 2 秒会被存活探测刷一次 last_probe，正常情况下用不到这个值；
-/// 它只是探测线程异常时的最后一道保险，别设太大否则感知会拖沓。
-pub const PROBE_DEVICE_TIMEOUT_SECS: i64 = 12;
+/// 这类设备现在也会被存活探测覆盖（每 2 秒刷 last_probe），正常情况下用不到这个值；
+/// 它只是探测线程异常时的最后一道保险。**必须大于扫描间隔的 3 倍**：
+/// 曾经取 12 秒 < 扫描间隔 15 秒，导致「每 15 秒闪一次离线」的确定性抖动。
+pub const PROBE_DEVICE_TIMEOUT_SECS: i64 = 45;
 /// 探测存活有效期（秒）：mTLS /hello 成功一次即认为设备还活着。
-/// 取 5 秒：探测周期 2s、单轮最长约 1s，往返间隔峰值约 3 秒，
-/// 留 2 秒余量避免「探测线程稍微卡一下就被判离线」的假抖动；
-/// 真正的离线由「连续 2 次探测失败」（≈4.4 秒）和广播超时（4 秒）负责，不依赖这个窗口。
-pub const PROBE_FRESH_SECS: i64 = 5;
+/// 取 8 秒 = 探测周期 2s × 2 + 单轮最长约 1s + 3s 余量。
+/// 曾经取 5 秒：只要某一轮稍慢（多设备并行握手、Wi-Fi 省电、正在传大文件），
+/// 「上一轮成功」到「下一轮成功」的间隔就会顶到 5 秒边界，设备被时间戳判离线，
+/// 紧接着下一次探测又成功 → 界面上一秒离线一秒在线地来回切。
+pub const PROBE_FRESH_SECS: i64 = 8;
 /// 近期设备存活探测周期（秒）。2 秒一轮，单台超时 0.9 秒且全部并行，
-/// 一轮总耗时不超过 1 秒，离线最迟「2 次失败 ≈ 4.5 秒」内反映到界面。
+/// 一轮总耗时通常不超过 1 秒。
 pub const LIVENESS_INTERVAL_SECS: u64 = 2;
 /// 连续探测失败达到该次数才判定离线，避免单次握手抖动导致闪断。
-/// 探测内部不再重试（见 transfer::probe_liveness），重试即下一轮，等价 4.4 秒内两次失败。
-pub const PROBE_OFFLINE_MISSES: u8 = 2;
+/// 取 3 次 × 2 秒 ≈ 6 秒：与 PROBE_FRESH_SECS 对齐（第 3 次失败时 last_probe 还没过期，
+/// 由计数而不是时间戳下判断，两个判据不会互相打架）。
+/// 探测内部不再重试（见 transfer::probe_liveness），重试即下一轮。
+pub const PROBE_OFFLINE_MISSES: u8 = 3;
+/// 网段扫描周期（秒）。只是广播被 AP 隔离时的兜底，别太密：
+/// 每轮要打 254 个 TCP SYN + 少量 mTLS 握手，扫得太勤本身就抬高了探测超时的概率。
+pub const SUBNET_SCAN_INTERVAL_SECS: u64 = 20;
+/// 设备状态诊断日志条数上限（环形缓冲，供同步页「设备日志」查看）
+pub const STATE_LOG_CAP: usize = 300;
 
 /// 接收确认超时（秒）：超时未点则自动拒绝，避免 HTTP 线程永久挂起。
 /// 用户反馈 90 秒偏短，这里放宽到 5 分钟；取消发送会立即解除等待。
@@ -106,6 +115,23 @@ pub struct PendingItem {
     pub size: u64,
 }
 
+/// 设备上下线诊断记录。
+///
+/// 排查「设备偶尔离线又上线来回切」时，光看界面只能知道抖了，不知道是谁判的：
+/// 广播超时、探测连续失败、手动刷新 strict、BYE、还是扫描兜底过期，处理方式完全不同。
+/// 每次状态翻转（以及「在线设备探测失败第 N 次」）都记一条，界面可见也可导出。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct StateLogEntry {
+    /// Unix 秒
+    pub ts: i64,
+    /// info 上线 / warn 离线与失败
+    pub level: String,
+    /// 设备名（离线后也可能取不到，用 id 兜底）
+    pub device: String,
+    /// 已格式化好的一行文本，界面直接显示
+    pub line: String,
+}
+
 /// 待前端确认的接收请求
 pub struct PendingRequest {
     pub id: String,
@@ -155,6 +181,8 @@ pub struct SyncRuntime {
     /// 发现线程本身没有 AppHandle，无法直接发事件；靠这个标志把「秒级上线」也事件化，
     /// 不用等前端 5 秒一次的兜底轮询。
     pub device_dirty: AtomicBool,
+    /// 设备上下线诊断日志（环形，最多 STATE_LOG_CAP 条）
+    pub state_log: Mutex<std::collections::VecDeque<StateLogEntry>>,
 }
 
 impl SyncRuntime {
@@ -172,6 +200,7 @@ impl SyncRuntime {
             probe_inflight: AtomicBool::new(false),
             probe_misses: Mutex::new(HashMap::new()),
             device_dirty: AtomicBool::new(false),
+            state_log: Mutex::new(std::collections::VecDeque::new()),
         }
     }
 
@@ -198,6 +227,16 @@ pub fn now_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// 把时间戳描述成「3.2s 前」，未记录时返回「无」。
+/// 诊断日志里必须带这个：只说「离线」无法区分是广播丢了还是探测失败了。
+pub fn age_desc(now: i64, ts: i64) -> String {
+    if ts <= 0 {
+        "无".to_string()
+    } else {
+        format!("{:.1}s 前", (now - ts).max(0) as f64)
+    }
 }
 
 /// 读取本机显示名（仅同步功能使用，用户可在同步页修改）

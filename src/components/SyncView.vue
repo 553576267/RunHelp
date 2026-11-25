@@ -9,7 +9,15 @@ const {
   doPair, toggleFavorite, removeDevice, selectDevice, sendText, pickFiles, cancelSend,
   approveReceive, approveFingerprint, rejectReceive, receiveAllRequests,
   incomingViewReq, openIncoming, fmtSize, kindLabel, platformLabel, shortFp, receiveStageLabel, stageLabel,
+  stateLog, stateLogOpen, loadStateLog, openStateLog, closeStateLog,
 } = useSync();
+
+// 诊断日志时间戳：后端给 Unix 秒，按本地时间显示到秒
+function logTime(ts: number) {
+  const d = new Date(ts * 1000);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
 </script>
 
 <template>
@@ -50,12 +58,20 @@ const {
         <section class="card pad device-panel">
           <div class="section-title row-between">
             <span>{{ t('附近设备') }}</span>
-            <button class="btn sm refresh-btn" :disabled="isActionActive('refresh-devices')" @click="refreshDevices">
-              <svg class="refresh-icon" :class="{ spin: isActionActive('refresh-devices') }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
-                <path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5" />
-              </svg>
-              {{ t('刷新') }}
-            </button>
+            <div class="head-actions">
+              <button
+                class="btn sm ghost"
+                :title="t('设备日志（上下线判定原因）')"
+                :aria-label="t('设备日志')"
+                @click="openStateLog"
+              >{{ t('设备日志') }}</button>
+              <button class="btn sm refresh-btn" :disabled="isActionActive('refresh-devices')" @click="refreshDevices">
+                <svg class="refresh-icon" :class="{ spin: isActionActive('refresh-devices') }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+                  <path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5" />
+                </svg>
+                {{ t('刷新') }}
+              </button>
+            </div>
           </div>
           <div class="device-list">
             <div v-if="!deviceList.length" class="muted empty-hint">
@@ -320,6 +336,30 @@ const {
         </div>
       </div>
     </div>
+
+    <!-- 设备状态诊断日志：每次上下线都带「谁判的、两个时间戳多久没刷新」 -->
+    <div v-if="stateLogOpen" class="modal-mask">
+      <div class="modal state-log-modal">
+        <h3>{{ t('设备日志') }}</h3>
+        <p class="muted tiny">{{ t('记录每次上下线与判定原因，用于排查设备状态来回切换') }}</p>
+        <div class="state-log-body">
+          <div v-if="!stateLog.length" class="muted empty-hint">{{ t('暂无记录') }}</div>
+          <div
+            v-for="(l, i) in stateLog"
+            :key="i"
+            class="state-log-row"
+            :class="{ warn: l.level === 'warn' }"
+          >
+            <span class="mono state-log-time">{{ logTime(l.ts) }}</span>
+            <span class="state-log-text">{{ l.line }}</span>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn" @click="loadStateLog">{{ t('刷新') }}</button>
+          <button class="btn primary" @click="closeStateLog">{{ t('关闭') }}</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -344,6 +384,17 @@ const {
 .device-panel, .compose-panel, .receive-panel { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .section-title { font-size: 12px; color: var(--text-1); font-weight: 600; margin-bottom: 12px; }
 .row-between { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+/* 标题右侧操作组：「设备日志」是排查入口，做成低权重的 ghost 按钮，不跟「刷新」抢注意力 */
+.head-actions { display: flex; align-items: center; gap: 6px; }
+.state-log-modal { width: min(760px, 92vw); max-height: 72vh; display: flex; flex-direction: column; }
+.state-log-body {
+  flex: 1; min-height: 120px; overflow-y: auto; margin: 10px 0; padding: 8px 10px;
+  background: var(--bg-1); border: 1px solid var(--border); border-radius: 8px;
+}
+.state-log-row { display: flex; gap: 8px; padding: 2px 0; font-size: 11.5px; color: var(--text-1); }
+.state-log-row.warn .state-log-text { color: var(--warn); }
+.state-log-time { flex-shrink: 0; color: var(--text-2); }
+.state-log-text { white-space: pre-wrap; word-break: break-all; }
 .field label, .text-block label { display: block; font-size: 11px; color: var(--text-2); margin-bottom: 5px; }
 .hint { font-size: 11px; margin-top: 5px; display: block; }
 .tiny { font-size: 10px; }

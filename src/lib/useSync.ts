@@ -7,6 +7,7 @@ import { t, setLocale } from './i18n';
 import { useActionFeedback } from './useActionFeedback';
 import type {
   SyncDevice,
+  SyncStateLog,
   SyncStatus,
   SyncRequestEvent,
   SyncRequestItem,
@@ -115,6 +116,9 @@ export function useSync() {
   const settings = ref<Record<string, string>>({});
   const devices = ref<SyncDevice[]>([]);
   const selectedId = ref('');
+  // 设备状态诊断日志（排查离线/上线来回切）
+  const stateLog = ref<SyncStateLog[]>([]);
+  const stateLogOpen = ref(false);
   const textInput = ref('');
   const pairIp = ref('');
   const editingName = ref(false);
@@ -460,13 +464,16 @@ export function useSync() {
   onUnmounted(() => {
     unlisteners.forEach((fn) => fn());
     if (autoTimer) clearInterval(autoTimer);
+    if (holdTimer) window.clearTimeout(holdTimer);
     clearAction();
   });
 
-  async function probeRecent() {
+  async function probeRecent(strict = false) {
     try {
       // command 现在立即返回，探测在后端后台线程完成并通过 sync://devices-updated 通知
-      await api.syncProbeRecent(10);
+      // strict 只给「手动下拉刷新」用：一次不应答即判离线。页面打开用宽容判据，
+      // 否则弱信号下一次超时就把设备判成离线，2 秒后后台探测又成功 → 一进页面先闪一下。
+      await api.syncProbeRecent(10, strict);
     } catch {
       /* 探测失败不影响普通发现流程 */
     }
@@ -481,11 +488,67 @@ export function useSync() {
       .join(',');
   }
 
+  // —— 显示层去抖 ——
+  // 后端判定「离线」需要连续 3 次探测失败（约 6 秒无应答），已经比较保守；
+  // 但弱 Wi-Fi 下仍可能「判离线 → 2 秒后探测又成功」，界面就是绿点灰点来回闪。
+  // 这里把「刚变离线」压住 1.5 秒再显示：期间若恢复，用户根本看不到这次抖动；
+  // 真离线则在 1.5 秒后补一次刷新，正常变灰。
+  // 只影响显示，不影响后端判定、事件和任何传输逻辑。
+  const OFFLINE_HOLD_MS = 1500;
+  const offlineHold = new Map<string, number>();
+  let holdTimer: number | undefined;
+
+  function deviceKey(d: SyncDevice): string {
+    return d.fingerprint || d.id || d.ip;
+  }
+
+  function mergeDeviceList(next: SyncDevice[], manual: boolean): SyncDevice[] {
+    if (manual) {
+      offlineHold.clear();
+      return next;
+    }
+    const now = Date.now();
+    let pending = false;
+    const merged = next.map((d) => {
+      const key = deviceKey(d);
+      const prev = devices.value.find((p) => deviceKey(p) === key);
+      if (prev?.online && !d.online) {
+        const until = offlineHold.get(key);
+        if (until === undefined) {
+          offlineHold.set(key, now + OFFLINE_HOLD_MS);
+          pending = true;
+          return { ...d, online: true };
+        }
+        if (now < until) {
+          pending = true;
+          return { ...d, online: true };
+        }
+        offlineHold.delete(key);
+      }
+      if (d.online) offlineHold.delete(key);
+      return d;
+    });
+    // 列表里已经没有的设备清掉残留 key，避免 Map 无限增长
+    const alive = new Set(merged.map(deviceKey));
+    for (const key of [...offlineHold.keys()]) {
+      if (!alive.has(key)) offlineHold.delete(key);
+    }
+    if (pending) {
+      if (holdTimer) window.clearTimeout(holdTimer);
+      holdTimer = window.setTimeout(() => {
+        holdTimer = undefined;
+        void refreshDeviceList();
+      }, OFFLINE_HOLD_MS + 100);
+    }
+    return merged;
+  }
+
   async function refreshDeviceList(manual = false) {
     try {
       const next = await api.syncListDevices();
-      if (manual || deviceSignature(next) !== deviceSignature(devices.value)) {
-        devices.value = next;
+      const merged = mergeDeviceList(next, manual);
+      if (manual || deviceSignature(merged) !== deviceSignature(devices.value)) {
+        devices.value = merged;
       }
     } catch (e) {
       if (manual) notify(String(e));
@@ -495,11 +558,31 @@ export function useSync() {
   // 手动刷新：先拉列表立即反馈，再触发后台探测（完成后事件会再刷新一次）
   async function doRefreshDevices(manual: boolean) {
     await refreshDeviceList(manual);
-    void probeRecent();
+    void probeRecent(manual);
   }
 
   function refreshDevices() {
     triggerAction('refresh-devices', () => { void doRefreshDevices(true); });
+  }
+
+  // 设备状态诊断日志（同步页「设备日志」弹层）
+  async function loadStateLog() {
+    try {
+      // 后端按时间正序返回，界面把最新的放最上面，省得每次都要滚到底
+      const list = await api.syncStateLog(200);
+      stateLog.value = [...list].reverse();
+    } catch {
+      stateLog.value = [];
+    }
+  }
+
+  function openStateLog() {
+    stateLogOpen.value = true;
+    void loadStateLog();
+  }
+
+  function closeStateLog() {
+    stateLogOpen.value = false;
   }
 
   async function pullPending(prompt = false) {
@@ -1422,6 +1505,7 @@ export function useSync() {
     changeTheme, changeKeepAlive, changeLanguage, changeReceiveDir, resetReceiveDir, receivedPaths,
     saveReceivedToDownloads, openSavedDir,
     receiveDirOpen, receiveDirLoading, receiveDirItems, receiveDirLabel,
+    stateLog, stateLogOpen, loadStateLog, openStateLog, closeStateLog,
     loadSavedFiles, openSavedFile, openInFileManager,
     doPair, toggleFavorite, removeDevice, selectDevice, sendText, pickFiles, cancelSend,
     requestDecision, approveReceive, approveFingerprint, rejectReceive, receiveAllRequests, openIncoming,

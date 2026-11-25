@@ -120,8 +120,19 @@ pub fn start(
                             // 对方关闭软件时发出的 BYE：立即移除，刷新即刻反映离线。
                             if let Some(bye_id) = text.strip_prefix(&format!("{}|", KIND_BYE)) {
                                 if bye_id != local_id {
-                                    if let Ok(mut devices) = rt.devices.lock() {
-                                        devices.remove(bye_id);
+                                    let removed = rt
+                                        .devices
+                                        .lock()
+                                        .ok()
+                                        .and_then(|mut devices| devices.remove(bye_id));
+                                    if let Some(d) = removed {
+                                        // BYE 只说明「对方主动关了同步服务」，是真离线，不用等超时。
+                                        super::commands::note_state(
+                                            &rt, "warn", &d.name,
+                                            format!("[设备] {} 离线 · 收到关闭通知(BYE) · ip {}", d.name, d.ip),
+                                        );
+                                        // 移除也算列表变化，立刻让前端刷新，别等 5 秒轮询。
+                                        rt.device_dirty.store(true, Ordering::SeqCst);
                                     }
                                 }
                                 continue;
@@ -135,7 +146,18 @@ pub fn start(
                                     IpAddr::V4(v4) => v4.to_string(),
                                     IpAddr::V6(v6) => v6.to_string(),
                                 };
-                                upsert_device(&rt, id, dev_name, dev_platform, ip.clone(), dev_port, dev_fp);
+                                let outcome = upsert_device(&rt, id, dev_name, dev_platform, ip, dev_port, dev_fp);
+                                if outcome.is_new || outcome.went_online {
+                                    super::commands::note_state(
+                                        &rt, "info", &outcome.name,
+                                        format!(
+                                            "[设备] {} {} · 收到广播 · ip {}",
+                                            outcome.name,
+                                            if outcome.is_new { "上线（新发现）" } else { "重新上线" },
+                                            outcome.ip
+                                        ),
+                                    );
+                                }
                                 // 只对 HELLO 回 HERE；HERE 是回应，不再回，避免来回打乒乓
                                 if kind == KIND_HELLO {
                                     // 用源 IP:端口回单播；src 已是 SocketAddr，直接把端口换成发现端口
@@ -152,16 +174,46 @@ pub fn start(
                     Err(_) => {}
                 }
 
-                // 清理超时设备：广播发现的 5 秒；仅靠网段探测发现的给足 45 秒，
-                // 否则 15 秒扫描间隔设备会「闪一下就消失」。
+                // 清理超时设备：常规设备 4 秒（广播）+ 8 秒（探测）；只靠扫描发现的给足 45 秒。
+                // 清理时把「为什么离线」记进诊断日志，这是区分「信号丢了」和「逻辑判错」的关键证据。
                 let now = super::now_secs();
+                let mut dropped: Vec<(String, String, String, String, bool, bool)> = Vec::new();
                 if let Ok(mut devices) = rt.devices.lock() {
-                    let before = devices.len();
-                    devices.retain(|_, d| d.is_online(now));
+                    devices.retain(|_, d| {
+                        if d.is_online(now) {
+                            return true;
+                        }
+                        dropped.push((
+                            d.name.clone(),
+                            d.ip.clone(),
+                            super::age_desc(now, d.last_seen),
+                            super::age_desc(now, d.last_probe),
+                            d.probe_only,
+                            // 已经由探测线程/状态扫描判过离线并记过日志的，这里只清不重复记
+                            d.online,
+                        ));
+                        false
+                    });
                     // 有设备因超时被清掉：也要推一次事件，否则界面上会「幽灵」停留到下次轮询。
-                    if devices.len() != before {
+                    if !dropped.is_empty() {
                         rt.device_dirty.store(true, Ordering::SeqCst);
                     }
+                }
+                for (name, ip, hb, probe, probe_only, was_online) in dropped {
+                    if !was_online {
+                        continue;
+                    }
+                    super::commands::note_state(
+                        &rt, "warn", &name,
+                        format!(
+                            "[设备] {} 离线 · 心跳/探测时间戳均超时（{}）· 心跳 {} / 探测 {} · ip {}",
+                            name,
+                            if probe_only { "仅扫描发现" } else { "广播+探测" },
+                            hb,
+                            probe,
+                            ip
+                        ),
+                    );
                 }
             }
             let _ = socket.send_to(bye_packet.as_bytes(), broadcast_addr);
@@ -183,7 +235,20 @@ fn is_placeholder_platform(platform: &str) -> bool {
     p.is_empty() || p == "unknown"
 }
 
-/// 广播发现的常规设备（5 秒心跳超时）
+/// upsert 的结果：调用方据此决定要不要记一条上下线诊断日志。
+/// 发现线程/扫描线程/探测线程各自有不同「上线原因」，日志必须由它们自己写，
+/// 所以这里只回传事实，不在这里记日志。
+pub struct UpsertOutcome {
+    /// 这是第一次见到该设备
+    pub is_new: bool,
+    /// 之前是离线（或不存在），这次转成在线
+    pub went_online: bool,
+    pub name: String,
+    pub fingerprint: String,
+    pub ip: String,
+}
+
+/// 广播发现的常规设备（4 秒心跳超时）
 pub fn upsert_device(
     rt: &SyncRuntime,
     id: String,
@@ -192,8 +257,8 @@ pub fn upsert_device(
     ip: String,
     port: u16,
     fingerprint: String,
-) {
-    upsert_device_ex(rt, id, name, platform, ip, port, fingerprint, false);
+) -> UpsertOutcome {
+    upsert_device_ex(rt, id, name, platform, ip, port, fingerprint, false)
 }
 
 /// 网段探测发现的设备：无广播心跳，用更长的离线超时。
@@ -205,8 +270,8 @@ pub fn upsert_device_probe(
     ip: String,
     port: u16,
     fingerprint: String,
-) {
-    upsert_device_ex(rt, id, name, platform, ip, port, fingerprint, true);
+) -> UpsertOutcome {
+    upsert_device_ex(rt, id, name, platform, ip, port, fingerprint, true)
 }
 
 fn upsert_device_ex(
@@ -218,7 +283,7 @@ fn upsert_device_ex(
     port: u16,
     fingerprint: String,
     probe_only: bool,
-) {
+) -> UpsertOutcome {
     let now = super::now_secs();
     // 广播发现刷新 last_seen，探测发现只刷新 last_probe：
     // 两个时间戳分开，才能既容忍广播丢包，又让探测结果维持在线（详见 DeviceInfo::is_online）。
@@ -226,7 +291,8 @@ fn upsert_device_ex(
         if let Some(existing) = devices.get_mut(&id) {
             // 由离线转为在线也算「列表有变化」：前端要在 1~2 秒内看到它亮起来，
             // 不能等 5 秒一次的兜底轮询。
-            if !existing.online {
+            let went_online = !existing.online;
+            if went_online {
                 rt.device_dirty.store(true, Ordering::SeqCst);
             }
             // 探测路径以前只能填 "unknown"/"未知设备" 占位，不能让它覆盖广播拿到的真实信息，
@@ -254,11 +320,24 @@ fn upsert_device_ex(
             if !fingerprint.is_empty() {
                 existing.fingerprint = fingerprint;
             }
-            return;
+            return UpsertOutcome {
+                is_new: false,
+                went_online,
+                name: existing.name.clone(),
+                fingerprint: existing.fingerprint.clone(),
+                ip: existing.ip.clone(),
+            };
         }
     }
     // 可信状态不在这里读库：发现层只维护「谁在线」，
     // 可信/收藏/别名由命令层在列出设备时按指纹合并 sync_devices 表。
+    let outcome = UpsertOutcome {
+        is_new: true,
+        went_online: true,
+        name: name.clone(),
+        fingerprint: fingerprint.clone(),
+        ip: ip.clone(),
+    };
     let device = DeviceInfo {
         id: id.clone(),
         name,
@@ -281,6 +360,7 @@ fn upsert_device_ex(
     }
     // 新设备第一次出现：立刻通知前端刷新，不必等兜底轮询。
     rt.device_dirty.store(true, Ordering::SeqCst);
+    outcome
 }
 
 // ===== 网段主动探测（热点/AP 隔离下的发现兜底） =====
@@ -326,14 +406,15 @@ pub fn start_subnet_scan(rt: Arc<SyncRuntime>, self_id: String, self_name: Strin
     std::thread::Builder::new()
         .name("runhelp-sync-subnet-scan".to_string())
         .spawn(move || {
-            // 首轮立即扫，之后每 15 秒一轮；扫描本身耗时通常 < 2 秒。
+            // 首轮立即扫，之后每 SUBNET_SCAN_INTERVAL_SECS 秒一轮；扫描本身耗时通常 < 2 秒。
+            // 间隔别调太密：跳数越多越容易和 600ms/900ms 的存活探测抢射频，反而制造假离线。
             loop {
                 if scan_stop.load(Ordering::SeqCst) {
                     break;
                 }
                 scan_round(&rt, &identity, &self_id, &self_name, &scan_stop);
                 // 分段 sleep，便于停止标志及时生效
-                for _ in 0..15 {
+                for _ in 0..super::SUBNET_SCAN_INTERVAL_SECS {
                     if scan_stop.load(Ordering::SeqCst) {
                         return;
                     }
@@ -424,15 +505,27 @@ fn scan_round(
                     super::transfer::probe_scan(&ip_str, TRANSFER_PORT, &identity, &self_id, &self_name)
                 {
                     if !info.id.is_empty() && !info.fingerprint.is_empty() {
-                        upsert_device_probe(
+                        let outcome = upsert_device_probe(
                             &rt,
                             info.id,
                             if info.name.is_empty() { "未知设备".to_string() } else { info.name },
                             if info.platform.is_empty() { "unknown".to_string() } else { info.platform },
-                            ip_str,
+                            ip_str.clone(),
                             TRANSFER_PORT,
                             info.fingerprint,
                         );
+                        // 只在「首次发现/由离线转在线」时记一行，避免每 20 秒刷屏。
+                        if outcome.is_new || outcome.went_online {
+                            super::commands::note_state(
+                                &rt, "info", &outcome.name,
+                                format!(
+                                    "[设备] {} {} · 网段扫描发现（广播可能被 AP 隔离）· ip {}",
+                                    outcome.name,
+                                    if outcome.is_new { "上线（新发现）" } else { "重新上线" },
+                                    outcome.ip
+                                ),
+                            );
+                        }
                     }
                 }
             }

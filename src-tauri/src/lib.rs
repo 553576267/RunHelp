@@ -172,6 +172,7 @@ pub fn run() {
             sync::commands::sync_set_device_name,
             sync::commands::sync_set_receive_dir,
             sync::commands::sync_list_devices,
+            sync::commands::sync_state_log,
             sync::commands::sync_pair_device,
             sync::commands::sync_set_favorite,
             sync::commands::sync_set_alias,
