@@ -572,7 +572,23 @@ fn handle_request(stream: &mut TlsStream, req: HttpRequest, rt: &Arc<SyncRuntime
         // 指纹用 mTLS 握手提取的 peer_fp（不可伪造），不采信声称的指纹。
         let from_id = header_safe(req.header("X-RH-Id").unwrap_or(""));
         if !from_id.is_empty() && !peer_fp.is_empty() && !peer_ip.is_empty() {
-            let from_name = url_decode(req.header("X-RH-Name").unwrap_or(""));
+            let claimed_name = url_decode(req.header("X-RH-Name").unwrap_or(""));
+            // 名字降级：已有同指纹设备时，不采信请求头里的名字。旧版本对端的网段扫描
+            // 用的是启动时的名字快照，改名后头里还是旧名；采信它会把刚探测到的新名字改回去。
+            // 名字交给本机主动探测（`/hello` 响应是实时读库的）去维护。
+            let known_name = {
+                let existing = rt
+                    .devices
+                    .lock()
+                    .ok()
+                    .and_then(|ds| {
+                        ds.values()
+                            .find(|d| !d.fingerprint.is_empty() && d.fingerprint == peer_fp)
+                            .map(|d| d.name.clone())
+                    });
+                existing.filter(|n| !n.trim().is_empty())
+            };
+            let from_name = known_name.unwrap_or(claimed_name);
             let from_platform = header_safe(req.header("X-RH-Platform").unwrap_or(""));
             super::discovery::upsert_device_probe(
                 rt,
