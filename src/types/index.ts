@@ -77,7 +77,11 @@ export interface RunHistory {
 
 export interface LogEvent {
   run_id: string;
-  stream: 'stdout' | 'stderr' | 'info';
+  /**
+   * `warn` 只给「设备状态」这类自身带级别的日志用（后端 level=warn 时下发）：
+   * 它们不是进程的 stderr，混进 stderr 会被错误正则染红，看起来像执行失败。
+   */
+  stream: 'stdout' | 'stderr' | 'info' | 'warn';
   line: string;
 }
 

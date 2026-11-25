@@ -319,7 +319,11 @@ fn push_state_log(rt: &SyncRuntime, level: &str, device: &str, line: String, mir
             crate::models::LogEvent {
                 // 独立 run_id：前端日志面板按行显示，和项目流水线的 run_id 区分开
                 run_id: "sync-device".to_string(),
-                stream: if level == "warn" { "stderr" } else { "info" }.to_string(),
+                // level 直接映射到 stream（warn / info），**不要借 stderr**：
+                // 设备离线、探测失败的文案里带「失败/超时」，走 stderr 会被前端的错误
+                // 正则判成 err 染红，看着像流水线执行失败。前端按 warn → 黄色处理，
+                // 与同步页「设备日志」弹层的配色一致。
+                stream: if level == "warn" { "warn" } else { "info" }.to_string(),
                 line,
             },
         );

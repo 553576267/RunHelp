@@ -17,6 +17,9 @@ const WARN_RE = /(?:warn|warning|deprecated|deprecation|警告|已弃用)/i;
 /** 英文版结束横幅带 Exit code，用来兜底判定成败（正常路径由 handleRunEnd 直接指定） */
 const EXIT_CODE_RE = /(?:退出码|Exit code)\s*(-?\d+)/;
 
+/** 设备状态日志里的「坏消息」：离线、探测没应答、不可达。命中的行用警告黄。 */
+const DEVICE_BAD_RE = /(?:离线|未应答|不可达|失败|超时|拒绝|offline|unreachable|failed|timeout)/i;
+
 function isBanner(s: string): boolean {
   return s.startsWith('━') && s.includes('【RunHelp】');
 }
@@ -49,7 +52,14 @@ export function classifyLog(l: LogEvent): LogLineKind {
   // 4. 命令回显
   if (s.startsWith('$ ')) return 'echo';
 
-  // 5. 进程输出：先看 stderr 的错误/警告，其余一律按正文
+  // 5. 设备状态日志（上下线 / 探测结果）：颜色跟「设备日志」弹层保持一致——
+  // 带警告意味的（离线、探测失败）黄，正常事件（上线、新发现）灰。
+  // 必须排在 stderr 判定之前：这类行文案里有「失败/超时」，否则会被错误正则染红。
+  if (l.stream === 'warn' || s.startsWith('[设备]')) {
+    return DEVICE_BAD_RE.test(s) ? 'warn' : 'out';
+  }
+
+  // 6. 进程输出：先看 stderr 的错误/警告，其余一律按正文
   if (l.stream === 'stderr') {
     if (ERROR_RE.test(s)) {
       // "warning: failed to ..." 这类行以警告开头，按警告处理，别把整段 stderr 染红
