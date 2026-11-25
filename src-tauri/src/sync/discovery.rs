@@ -90,8 +90,8 @@ pub fn start(
     let stop = rt.discovery_stop.clone();
     let stop_thread = stop.clone();
     // HELLO 走广播；HERE 走单播，收到对方 HELLO 后定向回一包，解决多网卡单向发现
-    let hello_packet = build_packet(&device_id, &name, &platform, port, KIND_HELLO, &fingerprint);
-    let here_packet = build_packet(&device_id, &name, &platform, port, KIND_HERE, &fingerprint);
+    let mut hello_packet = build_packet(&device_id, &name, &platform, port, KIND_HELLO, &fingerprint);
+    let mut here_packet = build_packet(&device_id, &name, &platform, port, KIND_HERE, &fingerprint);
     // 关闭通知带上自身 id，对方收到后立即从列表移除，无需等超时。
     let bye_packet = format!("{}|{}", KIND_BYE, device_id);
     let local_id = device_id.clone();
@@ -103,10 +103,19 @@ pub fn start(
             let mut last_broadcast = std::time::Instant::now()
                 .checked_sub(Duration::from_secs(1))
                 .unwrap_or_else(std::time::Instant::now);
+            // 包体跟着「当前设备名」走：改名后在下一轮广播就生效，
+            // 不必重启同步服务（以前包体是启动时构造的固定字节，对方永远看到旧名字）。
+            let mut cur_name = name;
 
             while !stop_thread.load(Ordering::SeqCst) {
                 // 每秒广播一次
                 if last_broadcast.elapsed() >= Duration::from_secs(1) {
+                    let latest = rt.self_name.lock().map(|s| s.clone()).unwrap_or_default();
+                    if !latest.is_empty() && latest != cur_name {
+                        cur_name = latest;
+                        hello_packet = build_packet(&local_id, &cur_name, &platform, port, KIND_HELLO, &fingerprint);
+                        here_packet = build_packet(&local_id, &cur_name, &platform, port, KIND_HERE, &fingerprint);
+                    }
                     let _ = socket.send_to(hello_packet.as_bytes(), broadcast_addr);
                     last_broadcast = std::time::Instant::now();
                 }
@@ -288,6 +297,22 @@ fn upsert_device_ex(
     // 广播发现刷新 last_seen，探测发现只刷新 last_probe：
     // 两个时间戳分开，才能既容忍广播丢包，又让探测结果维持在线（详见 DeviceInfo::is_online）。
     if let Ok(mut devices) = rt.devices.lock() {
+        // 同一台设备换了 id（重装应用、恢复备份后 id 重建）：指纹才是设备身份证，
+        // 顺手清掉旧 id 遗留的**离线**条目，避免列表里留着一条永远不再更新的幽灵。
+        // 只清离线条目：在线条目若与当前 id 同指纹，说明是本机识别出了问题（不该发生），
+        // 贸然互删会让两个来源每包来回插删，反而变成新的抖动源。
+        if !fingerprint.is_empty() {
+            let stale: Vec<String> = devices
+                .iter()
+                .filter(|(k, d)| {
+                    k.as_str() != id && !d.fingerprint.is_empty() && d.fingerprint == fingerprint && !d.online
+                })
+                .map(|(k, _)| k.clone())
+                .collect();
+            for k in stale {
+                devices.remove(&k);
+            }
+        }
         if let Some(existing) = devices.get_mut(&id) {
             // 由离线转为在线也算「列表有变化」：前端要在 1~2 秒内看到它亮起来，
             // 不能等 5 秒一次的兜底轮询。
@@ -295,10 +320,16 @@ fn upsert_device_ex(
             if went_online {
                 rt.device_dirty.store(true, Ordering::SeqCst);
             }
-            // 探测路径以前只能填 "unknown"/"未知设备" 占位，不能让它覆盖广播拿到的真实信息，
-            // 否则设备类型会「有时变成 unknown」。只有新值有效时才更新。
-            if !is_placeholder_name(&name) {
-                existing.name = name;
+            // 名字来源有两个：UDP 广播（旧版对端是启动时的固定包，改名后仍是旧名）
+            // 与 `/hello` 探测（实时读库，永远最新）。探测名在保鲜期内优先，
+            // 否则每秒一包的广播会一直把新名字改回旧名字。
+            let probe_name_fresh =
+                existing.name_probe_at > 0 && now - existing.name_probe_at < super::NAME_PROBE_HOLD_SECS;
+            if !is_placeholder_name(&name) && (probe_only || !probe_name_fresh) {
+                existing.name = name.clone();
+            }
+            if probe_only && !is_placeholder_name(&name) {
+                existing.name_probe_at = now;
             }
             if !is_placeholder_platform(&platform) {
                 existing.platform = platform;
@@ -354,6 +385,7 @@ fn upsert_device_ex(
         last_ip: ip,
         online: true,
         probe_only,
+        name_probe_at: if probe_only { now } else { 0 },
     };
     if let Ok(mut devices) = rt.devices.lock() {
         devices.insert(id, device);
@@ -398,7 +430,7 @@ fn local_ipv4s() -> Vec<Ipv4Addr> {
 }
 
 /// 每秒广播启动的同时拉起网段扫描线程。返回其停止标志（与广播共用 rt.discovery_stop）。
-pub fn start_subnet_scan(rt: Arc<SyncRuntime>, self_id: String, self_name: String) {
+pub fn start_subnet_scan(rt: Arc<SyncRuntime>, self_id: String) {
     let stop = rt.discovery_stop.clone();
     let identity = rt.identity.clone();
     let scan_stop = stop.clone();
@@ -412,7 +444,7 @@ pub fn start_subnet_scan(rt: Arc<SyncRuntime>, self_id: String, self_name: Strin
                 if scan_stop.load(Ordering::SeqCst) {
                     break;
                 }
-                scan_round(&rt, &identity, &self_id, &self_name, &scan_stop);
+                scan_round(&rt, &identity, &self_id, &scan_stop);
                 // 分段 sleep，便于停止标志及时生效
                 for _ in 0..super::SUBNET_SCAN_INTERVAL_SECS {
                     if scan_stop.load(Ordering::SeqCst) {
@@ -433,9 +465,16 @@ fn scan_round(
     rt: &Arc<SyncRuntime>,
     identity: &super::identity::Identity,
     self_id: &str,
-    self_name: &str,
     stop: &Arc<std::sync::atomic::AtomicBool>,
 ) {
+    // 身份头里的名字每轮现取：改名后不用重启也能让对方看到新名字。
+    let self_name = rt.self_name.lock().map(|s| s.clone()).unwrap_or_default();
+    let self_name = if self_name.trim().is_empty() {
+        super::commands::display_name_ro()
+    } else {
+        self_name
+    };
+    let self_name = self_name.as_str();
     let locals = local_ipv4s();
     if locals.is_empty() {
         return;

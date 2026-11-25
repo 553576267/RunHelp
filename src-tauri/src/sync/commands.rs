@@ -356,6 +356,10 @@ pub fn sync_start(app: tauri::AppHandle) -> Result<(), String> {
     if let Err(e) = transfer::start_server(runtime.clone()) {
         return Err(e);
     }
+    // 广播包与网段探测的身份头都读这个值；改名命令会原地更新它，不必重启服务。
+    if let Ok(mut n) = runtime.self_name.lock() {
+        *n = name.clone();
+    }
     discovery::start(
         runtime.clone(),
         device_id.clone(),
@@ -365,7 +369,7 @@ pub fn sync_start(app: tauri::AppHandle) -> Result<(), String> {
         runtime.identity.fingerprint.clone(),
     )?;
     // 网段主动探测：热点/AP 隔离下 UDP 广播不可达时的发现兜底。
-    discovery::start_subnet_scan(runtime.clone(), device_id, name);
+    discovery::start_subnet_scan(runtime.clone(), device_id);
     // 近期设备存活探测：只探已知 IP，连续失败即置离线，解决热点下「上线快、离线慢」。
     start_recent_liveness(app.clone());
     runtime.started.store(true, Ordering::SeqCst);
@@ -419,6 +423,15 @@ pub fn sync_set_device_name(name: String) -> Result<(), String> {
         [&name],
     )
     .map_err(|e| e.to_string())?;
+    // 同时更新内存里的名字：广播包与网段探测的身份头都读它。
+    // 只写库不更新这里的话，对方要等到重启同步服务才能看到新名字；
+    // 而 `/hello` 是实时读库的，于是同一台设备会有「新名字 / 旧名字」两个来源
+    // 交替覆盖，界面上就来回跳。
+    if let Some(runtime) = AppState::sync_holder_for_sync() {
+        if let Ok(mut n) = runtime.self_name.lock() {
+            *n = name.clone();
+        }
+    }
     Ok(())
 }
 
@@ -520,6 +533,7 @@ pub fn sync_list_devices(app: tauri::AppHandle) -> Result<Vec<DeviceInfo>, Strin
                         fingerprint: fp, last_seen: 0, last_probe: 0,
                         trusted: trusted != 0, auto_accept: auto != 0,
                         favorite: fav != 0, alias, last_ip, online: false, probe_only: false,
+                        name_probe_at: 0,
                     });
                 }
             }
@@ -605,6 +619,8 @@ pub fn sync_pair_device(app: tauri::AppHandle, ip: String) -> Result<DeviceInfo,
         last_ip: ip,
         online: true,
         probe_only: false,
+        // 名字来自 /hello（实时读库），当作探测名记一次保鲜期
+        name_probe_at: super::now_secs(),
     };
     if let Ok(mut devices) = runtime.devices.lock() {
         devices.insert(id, info.clone());

@@ -55,6 +55,15 @@ pub const SUBNET_SCAN_INTERVAL_SECS: u64 = 20;
 /// 设备状态诊断日志条数上限（环形缓冲，供同步页「设备日志」查看）
 pub const STATE_LOG_CAP: usize = 300;
 
+/// 探测拿到的设备名保鲜期（秒）：在这段时间内，UDP 广播携带的名字不覆盖它。
+///
+/// 为什么要这个：广播包是「设备名 + id + 端口 + 指纹」的固定字节串。旧版本在
+/// 启动时构造一次、之后每秒重发（0.1.7 起改成每轮比对 `self_name` 重建），
+/// 所以改了名的旧版对端仍然广播旧名字。而 `/hello` 是实时读库的，
+/// 两条路径交替写入同一台设备的 `name` → 界面上「一会儿新名一会儿旧名」。
+/// 取 45 秒：大于 3 倍网段扫描周期（20s）与 2 倍保鲜期，探测总能赶在下一次覆盖前刷新。
+pub const NAME_PROBE_HOLD_SECS: i64 = 45;
+
 /// 接收确认超时（秒）：超时未点则自动拒绝，避免 HTTP 线程永久挂起。
 /// 用户反馈 90 秒偏短，这里放宽到 5 分钟；取消发送会立即解除等待。
 pub const REQUEST_TIMEOUT_SECS: u64 = 300;
@@ -90,6 +99,13 @@ pub struct DeviceInfo {
     pub online: bool,
     /// 是否仅靠网段探测发现（无广播心跳，需更长的离线超时）
     pub probe_only: bool,
+    /// 最近一次从 `/hello` 拿到设备名的时间（Unix 秒）。
+    ///
+    /// 名字有两个来源：UDP 广播（旧版对端在启动时构造一次包体，改名后还是旧名）
+    /// 和 `/hello`（实时读库，永远最新）。探测名在保鲜期内优先，避免被旧广播名反覆盖。
+    /// 只在内存里用，不下发前端。
+    #[serde(skip)]
+    pub name_probe_at: i64,
 }
 
 impl DeviceInfo {
@@ -183,6 +199,12 @@ pub struct SyncRuntime {
     pub device_dirty: AtomicBool,
     /// 设备上下线诊断日志（环形，最多 STATE_LOG_CAP 条）
     pub state_log: Mutex<std::collections::VecDeque<StateLogEntry>>,
+    /// 本机显示名：UDP 广播包与网段探测的身份头都从这里取。
+    ///
+    /// 以前广播包在 `discovery::start` 里构造一次、之后每秒重发同一份字节，
+    /// 改名后对方拿到的永远是旧名字（而 `/hello` 是实时读库的新名字），
+    /// 两个来源交替覆盖同一台设备的名字 —— 界面上就成了「一会儿新名一会儿旧名」。
+    pub self_name: Mutex<String>,
 }
 
 impl SyncRuntime {
@@ -201,6 +223,7 @@ impl SyncRuntime {
             probe_misses: Mutex::new(HashMap::new()),
             device_dirty: AtomicBool::new(false),
             state_log: Mutex::new(std::collections::VecDeque::new()),
+            self_name: Mutex::new(String::new()),
         }
     }
 
