@@ -1,6 +1,6 @@
 [package]
 name = "runhelp"
-version = "0.1.6"
+version = "0.1.7"
 description = "RunHelp 开发助手"
 authors = ["RunHelp"]
 edition = "2021"
