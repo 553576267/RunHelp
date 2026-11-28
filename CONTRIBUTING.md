@@ -54,10 +54,26 @@ cargo check --manifest-path src-tauri/Cargo.toml
 
 仓库架构：**GitCode 是主仓**（`origin`），日常提交只 push 到 GitCode；GitHub 与 Gitee 是镜像，由 GitCode 项目设置里的「仓库镜像 → Push」在 push 后单向自动同步，不要在镜像仓库直接改代码。
 
-1. 更新 `CHANGELOG.md` 与 `package.json` / `Cargo.toml` 版本号。
+1. 更新 `CHANGELOG.md` 与 `package.json` / `Cargo.toml` / `tauri.conf.json` 版本号。
+   依赖有增删或升级时，重跑 `python scripts/gen_third_party_licenses.py` 刷新 `THIRD-PARTY-LICENSES.md` 并一并提交。
 2. 提交后打 tag：`git tag -a v0.1.0 -m "version 0.1.0" && git push origin v0.1.0`（origin 指向 GitCode）。
-3. GitCode「仓库镜像 → Push」把代码和 tag 同步到 GitHub，GitHub Actions 构建 NSIS 安装包并创建草稿 Release，确认无误后发布。
+3. GitCode「仓库镜像 → Push」把代码和 tag 同步到 GitHub，GitHub Actions 构建 NSIS 安装包并**直接发布正式 Release**（workflow 里 `releaseDraft: false`），无需再到网页手动点发布。
 4. 把安装包复制到 GitCode / Gitee 镜像仓库的「发行版」，方便国内用户下载。
+
+## 贡献授权（inbound = outbound）
+
+本项目不需要签署 CLA。提交 Pull Request、补丁或任何形式的代码 / 文档内容，即表示你同意以下四点：
+
+1. 你对所提交内容拥有版权，或已取得版权所有者的授权；
+2. 你以**与本项目相同的 MIT 协议**授权该贡献（inbound = outbound），无需额外签署文件；
+3. 你同意维护者在不改变「源码继续开源」的前提下，对本项目整体（含你的贡献）做协议版本升级或补充例外条款——例如将来需要一并调整协议以适配某个分发渠道；
+4. 你的贡献不包含你无权开源的第三方代码；若引用了外部实现，请在 PR 描述里注明来源与许可。
+
+这样做的原因很实际：没有明确的授权链，将来既无法把协议从 MIT 调整为其它开源协议，也无法在商用或商店上架时证明代码来源干净。若你不接受第 3 点，请在 PR 里注明，我们可以只合并第 1、2 点的授权范围。
+
+## 安全问题
+
+发现安全漏洞**不要**开公开 Issue 贴细节，请按 [SECURITY.md](SECURITY.md) 的流程私下报告。
 
 ## 问题反馈
 

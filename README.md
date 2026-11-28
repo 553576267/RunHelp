@@ -172,9 +172,11 @@ src-tauri/                Rust 后端
   src/i18n.rs             后端提示字典（tr / trf，语言取自 settings.language）
   gen/android/            Android 工程与自定义插件 RunhelpMobilePlugin.kt
 migrations/               版本化建表与迁移（当前 user_version=5，含同步设备与指纹）
-scripts/                  Python 压缩 / 备份脚本、图标生成脚本
+scripts/                  Python 压缩 / 备份脚本、图标与第三方许可清单生成脚本
 docs/screenshots/         README 界面截图
 docs/assets/              README 用到的其它图片（赞赏码）
+THIRD-PARTY-LICENSES.md   第三方组件许可清单（由 scripts/gen_third_party_licenses.py 生成）
+SECURITY.md               安全模型、已知边界与漏洞报告流程
 ```
 
 ## 命令执行的设计要点（踩坑记录）
@@ -216,15 +218,52 @@ Windows GUI 应用里"跑命令"有几个非常隐蔽的坑，本项目的实现
 > 否则到点会被强制终止（退出码 124）。运行后软件会一直显示"运行中"，需要结束时
 > 点"终止"按钮——这是正常行为，不是卡住。
 
+## 隐私与权限说明
+
+### 不收集任何数据
+
+- **没有账号、没有云端、没有遥测**：程序不会向任何服务器上报使用数据、崩溃日志或设备信息。全仓库代码中只有校验「是否 http(s) 链接」的逻辑，不存在对外网络请求。
+- **所有数据在你本机**：项目、命令、流水线、脚本、运行记录、同步设备与信任关系全部存在本地单文件数据库
+  `%APPDATA%\com.runhelp.desktop\runhelp.db`（Android 在应用私有目录），删除这个目录等于清空全部记录（`设置 → 备份与恢复` 里可先导出备份）。
+- **局域网通信**：只在同一局域网内与你在界面上确认过的设备之间直传，内容经 mTLS 加密；发现阶段每秒广播一次本机的设备名、平台、端口与证书指纹（不含任何文件内容），用于让其他设备看到你在线。
+- **通知**：仅在任务成功且窗口不在前台时弹 Windows 系统通知，不发送到任何外部服务。
+
+### Android 权限逐项说明
+
+| 权限 | 用途 | 拒绝后的影响 |
+| --- | --- | --- |
+| `INTERNET` | 与同一局域网内的其它设备直传文件 | 同步功能完全不可用 |
+| `FOREGROUND_SERVICE`<br>`FOREGROUND_SERVICE_DATA_SYNC` | 退到后台后仍能接收文件（常驻一条「正在同步」通知） | 切到后台可能收不到文件 |
+| `WAKE_LOCK` | 等待接收 / 传输大文件时保持网络不休眠 | 息屏后传输易中断 |
+| `POST_NOTIFICATIONS` | 收到传输请求、传输完成时提醒（Android 13+ 需授权） | 仅少了提醒，功能不受影响 |
+| `READ_MEDIA_IMAGES`<br>`READ_MEDIA_VIDEO` | 在应用内相册网格里显示图片 / 视频供多选发送 | 可改用「文件」入口选择，相册页不可用 |
+| `READ_EXTERNAL_STORAGE`（Android 12 及以下） | 同上，旧系统的媒体读取权限 | 同上 |
+| `QUERY_ALL_PACKAGES` | 「应用」页列出已安装应用，用于把安装包导出给对方 | 该页列表为空 |
+
+关于 `QUERY_ALL_PACKAGES`：Android 11 起默认收紧应用可见性，不申请该权限时无法枚举已安装应用，「应用」页会几乎是空的（同类工具 LocalSend 同样申请）。本应用只用它读取应用名称、包名与安装包路径，用于从**你自己的设备**导出 APK，不读取任何应用内数据，也不做上传。若将来上架 Google Play，该权限属敏感权限，需在 Play 控制台单独申报用途。
+
+接收目录：默认写入「下载/RunHelp」；若你手动选择过文件夹，则通过系统文件选择器（SAF）获得该目录的持久化访问授权，除此之外不访问任何存储位置。
+
+### 关于「应用」导出功能的合规提示
+
+导出 APK 是备份你自己设备上已安装应用的功能。请仅导出**你合法拥有或有权分发**的应用；传播他人受版权保护的软件、或绕过应用商店分发的行为与本项目无关，由使用者自行承担。
+
+### 第三方组件与漏洞报告
+
+- 打包进安装包的第三方组件及其许可见 [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md)（由 `scripts/gen_third_party_licenses.py` 从依赖树自动生成）。
+- 安全问题请按 [SECURITY.md](SECURITY.md) 的流程私下报告，不要在公开 Issue 里贴可复现细节。
+
 ## 开源协议
 
 MIT License，详见 [LICENSE](LICENSE)。可自由使用、修改、商用，无需付费，但需保留版权声明。
+
+安装包中打包的第三方组件仍归各自作者所有，按其自身许可分发，清单见 [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md)。
 
 ## 贡献
 
 欢迎提交 Issue 与 Pull Request，流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-更新记录见 [CHANGELOG.md](CHANGELOG.md)。
+更新记录见 [CHANGELOG.md](CHANGELOG.md)。安全问题请按 [SECURITY.md](SECURITY.md) 私下报告。
 
 ## 赞赏
 
