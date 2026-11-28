@@ -2,7 +2,10 @@
 name = "runhelp"
 version = "0.1.7"
 description = "RunHelp 开发助手"
-authors = ["RunHelp"]
+authors = ["RunHelp contributors"]
+license = "MIT"
+repository = "https://gitcode.com/binglengdexie/RunHelp"
+homepage = "https://gitcode.com/binglengdexie/RunHelp"
 edition = "2021"
 
 [lib]
